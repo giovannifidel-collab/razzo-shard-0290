@@ -1,0 +1,11 @@
+{
+    "shard_id":  "shard-0290",
+    "control_plane":  "giovannifidel-collab/pfarma-ci",
+    "collision_domain_lease_required":  true,
+    "idempotency_required":  true,
+    "state":  "PROVISIONED",
+    "exact_sha_required":  true,
+    "repository":  "giovannifidel-collab/razzo-shard-0290",
+    "schema":  "razzo.shard.v1",
+    "product_progress":  false
+}
