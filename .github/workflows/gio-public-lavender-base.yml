@@ -1,0 +1,146 @@
+name: GIO OS Public Lavender Source Base
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-lavender-base.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gio-public-lavender-source-base
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      AOSP_ROOT: /mnt/gio-a14
+      OUT_DIR_COMMON_BASE: /mnt/gio-out
+      GIO_BASE_SOURCE: crDroid-14.0-public-source
+    steps:
+      - name: Record executor and maximize ephemeral workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== BEFORE CLEANUP ==='
+          df -hT / /mnt || true
+          free -h || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          sudo mkdir -p "$AOSP_ROOT" "$OUT_DIR_COMMON_BASE"
+          sudo chown -R "$USER:$USER" /mnt
+          echo '=== AFTER CLEANUP ==='
+          df -hT / /mnt || true
+
+      - name: Install Android build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf \
+            imagemagick lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev \
+            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
+            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 openjdk-17-jdk
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
+          chmod 0755 "$HOME/bin/repo"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          git lfs install --skip-repo
+
+      - name: Initialize exact public Android 14 source graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/bin:$PATH"
+          cd "$AOSP_ROOT"
+          repo init \
+            -u https://github.com/crdroidandroid/android.git \
+            -b 14.0 \
+            --git-lfs \
+            --no-clone-bundle \
+            --depth=1 \
+            --partial-clone \
+            --clone-filter=blob:limit=10M
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/gio-lavender-public.xml <<'XML'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remote name="crdroid-gio" fetch="https://github.com/crdroidandroid" />
+            <project path="device/xiaomi/lavender" name="android_device_xiaomi_lavender" remote="crdroid-gio" revision="fd2a90e734a101fad046736970fa4dfb492d7d78" />
+            <project path="kernel/xiaomi/lavender" name="android_kernel_xiaomi_lavender" remote="crdroid-gio" revision="b7b27af5994f7afc11f69cfef194a8dc738842b4" />
+            <project path="vendor/xiaomi/lavender" name="proprietary_vendor_xiaomi_lavender" remote="crdroid-gio" revision="483e3e7ca5828c54d8b4408b87ee14069a8d027b" />
+          </manifest>
+          XML
+          repo manifest -r -o /mnt/gio-resolved-manifest.xml
+          sha256sum /mnt/gio-resolved-manifest.xml | tee /mnt/gio-resolved-manifest.sha256
+
+      - name: Sync source with fail-closed disk guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/bin:$PATH"
+          cd "$AOSP_ROOT"
+          before="$(df -Pk /mnt | awk 'NR==2 {print $4}')"
+          repo sync -c --force-sync --optimized-fetch --prune --no-clone-bundle --no-tags -j4
+          after="$(df -Pk /mnt | awk 'NR==2 {print $4}')"
+          echo "SOURCE_SYNC_USED_KIB=$((before-after))"
+          du -sk "$AOSP_ROOT" | tee /mnt/gio-source-working-set.kib
+          df -h /mnt
+          test "$(git -C device/xiaomi/lavender rev-parse HEAD)" = fd2a90e734a101fad046736970fa4dfb492d7d78
+          test "$(git -C kernel/xiaomi/lavender rev-parse HEAD)" = b7b27af5994f7afc11f69cfef194a8dc738842b4
+          test "$(git -C vendor/xiaomi/lavender rev-parse HEAD)" = 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+
+      - name: Source-build unsigned public target-files
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          source build/envsetup.sh
+          lunch lineage_lavender-userdebug
+          export BUILD_NUMBER=GIOPUBLICA14
+          export BUILD_USERNAME=gio-public-fabric
+          export BUILD_HOSTNAME=razzo-shard
+          m -j2 target-files-package otatools-package
+          df -h /mnt
+
+      - name: Collect content-addressed public base artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          product_out="$OUT_DIR_COMMON_BASE/$(basename "$AOSP_ROOT")/target/product/lavender"
+          if [ ! -d "$product_out" ]; then
+            product_out="$(find "$OUT_DIR_COMMON_BASE" -type d -path '*/target/product/lavender' | head -1)"
+          fi
+          test -n "$product_out" -a -d "$product_out"
+          target_files="$(find "$OUT_DIR_COMMON_BASE" -type f -name '*target_files*.zip' | sort | tail -1)"
+          otatools="$(find "$OUT_DIR_COMMON_BASE" -type f -name 'otatools.zip' | sort | tail -1)"
+          test -n "$target_files" -a -f "$target_files"
+          mkdir -p "$GITHUB_WORKSPACE/gio-public-base"
+          cp "$target_files" "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip"
+          if [ -n "$otatools" ] && [ -f "$otatools" ]; then cp "$otatools" "$GITHUB_WORKSPACE/gio-public-base/otatools.zip"; fi
+          cp /mnt/gio-resolved-manifest.xml "$GITHUB_WORKSPACE/gio-public-base/"
+          cp /mnt/gio-resolved-manifest.sha256 "$GITHUB_WORKSPACE/gio-public-base/"
+          cp /mnt/gio-source-working-set.kib "$GITHUB_WORKSPACE/gio-public-base/"
+          sha256sum "$GITHUB_WORKSPACE/gio-public-base/"* | tee "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
+          printf '%s\n' \
+            'provenance=public-source-build' \
+            'target=lavender' \
+            'android=14' \
+            'private_gio_source_present=false' \
+            'signing_keys_present=false' \
+            > "$GITHUB_WORKSPACE/gio-public-base/PROVENANCE.env"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gio-lavender-public-source-base-${{ github.sha }}
+          path: gio-public-base/
+          retention-days: 3
+          compression-level: 0
+          if-no-files-found: error
