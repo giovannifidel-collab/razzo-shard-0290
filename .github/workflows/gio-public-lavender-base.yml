@@ -97,6 +97,38 @@ jobs:
           test "$(git -C kernel/xiaomi/lavender rev-parse HEAD)" = b7b27af5994f7afc11f69cfef194a8dc738842b4
           test "$(git -C vendor/xiaomi/lavender rev-parse HEAD)" = 483e3e7ca5828c54d8b4408b87ee14069a8d027b
 
+      - name: Add public generic GIO Secure Core hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('frameworks/base/services/java/com/android/server/SystemServer.java')
+          text = path.read_text()
+          marker = '// GIO_OS_PRIVATE_CORE_JAR_HOOK_V1'
+          if marker in text:
+              raise SystemExit(0)
+          anchors = [
+              'private void startOtherServices(@NonNull TimingsTraceAndSlog t) {',
+              'private void startOtherServices(TimingsTraceAndSlog t) {',
+          ]
+          anchor = next((a for a in anchors if a in text), None)
+          if anchor is None:
+              raise SystemExit('unsupported SystemServer startOtherServices anchor')
+          hook = '''\n        // GIO_OS_PRIVATE_CORE_JAR_HOOK_V1\n        try {\n            mSystemServiceManager.startServiceFromJar(\n                    "com.android.server.gioos.GioOsManagerService",\n                    "/system/framework/gioos-services.jar");\n        } catch (RuntimeException e) {\n            Slog.i(TAG, "GIO OS private Secure Core is not installed in this public base");\n        }\n'''
+          path.write_text(text.replace(anchor, anchor + hook, 1))
+          verify = path.read_text()
+          required = [marker, 'startServiceFromJar(', 'com.android.server.gioos.GioOsManagerService', '/system/framework/gioos-services.jar']
+          if not all(x in verify for x in required):
+              raise SystemExit('generic GIO jar hook verification failed')
+          print('GIO_PUBLIC_PRIVATE_CORE_HOOK=PASS')
+          PY
+          # No private GIO source is present on this worker.
+          ! find "$AOSP_ROOT" -path '*/vendor/gioos/*' -type f -print -quit | grep -q .
+          ! grep -R --exclude='SystemServer.java' -l 'class GioOsManagerService' "$AOSP_ROOT/frameworks" 2>/dev/null | grep -q .
+
       - name: Source-build unsigned public target-files
         shell: bash
         run: |
@@ -133,6 +165,7 @@ jobs:
             'provenance=public-source-build' \
             'target=lavender' \
             'android=14' \
+            'generic_gio_private_jar_hook=true' \
             'private_gio_source_present=false' \
             'signing_keys_present=false' \
             > "$GITHUB_WORKSPACE/gio-public-base/PROVENANCE.env"
@@ -141,6 +174,6 @@ jobs:
         with:
           name: gio-lavender-public-source-base-${{ github.sha }}
           path: gio-public-base/
-          retention-days: 3
+          retention-days: 1
           compression-level: 0
           if-no-files-found: error
