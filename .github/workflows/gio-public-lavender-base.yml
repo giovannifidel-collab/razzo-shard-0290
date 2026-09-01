@@ -78,8 +78,6 @@ jobs:
             <project path="vendor/xiaomi/lavender" name="proprietary_vendor_xiaomi_lavender" remote="crdroid-gio" revision="483e3e7ca5828c54d8b4408b87ee14069a8d027b" />
           </manifest>
           XML
-          repo manifest -r -o /mnt/gio-resolved-manifest.xml
-          sha256sum /mnt/gio-resolved-manifest.xml | tee /mnt/gio-resolved-manifest.sha256
 
       - name: Sync source with fail-closed disk guard
         shell: bash
@@ -96,6 +94,8 @@ jobs:
           test "$(git -C device/xiaomi/lavender rev-parse HEAD)" = fd2a90e734a101fad046736970fa4dfb492d7d78
           test "$(git -C kernel/xiaomi/lavender rev-parse HEAD)" = b7b27af5994f7afc11f69cfef194a8dc738842b4
           test "$(git -C vendor/xiaomi/lavender rev-parse HEAD)" = 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+          repo manifest -r -o /mnt/gio-resolved-manifest.xml
+          sha256sum /mnt/gio-resolved-manifest.xml | tee /mnt/gio-resolved-manifest.sha256
 
       - name: Add public generic GIO Secure Core hook
         shell: bash
@@ -125,7 +125,6 @@ jobs:
               raise SystemExit('generic GIO jar hook verification failed')
           print('GIO_PUBLIC_PRIVATE_CORE_HOOK=PASS')
           PY
-          # No private GIO source is present on this worker.
           ! find "$AOSP_ROOT" -path '*/vendor/gioos/*' -type f -print -quit | grep -q .
           ! grep -R --exclude='SystemServer.java' -l 'class GioOsManagerService' "$AOSP_ROOT/frameworks" 2>/dev/null | grep -q .
 
