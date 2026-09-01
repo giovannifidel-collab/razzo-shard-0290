@@ -1,0 +1,32 @@
+name: GIO Android Builder Capacity Probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/gio-capacity-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Measure hosted Android build capacity
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '=== INITIAL ==='
+          uname -a
+          nproc
+          free -h
+          df -hT / /mnt /tmp || true
+          echo '=== LARGE PREINSTALLED DIRS ==='
+          sudo du -x -h -d1 /usr /opt 2>/dev/null | sort -h | tail -20 || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo rm -rf /var/lib/apt/lists/* || true
+          echo '=== AFTER SAFE CLEANUP ==='
+          df -hT / /mnt /tmp || true
