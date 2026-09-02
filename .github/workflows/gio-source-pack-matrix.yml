@@ -1,0 +1,39 @@
+name: GIO Android 14 Source-Pack Matrix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-source-pack-matrix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: gio-a14-sourcepack-matrix-v2
+  cancel-in-progress: true
+
+jobs:
+  pack:
+    strategy:
+      fail-fast: false
+      max-parallel: 16
+      matrix:
+        pack_id: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      PACK_ID: ${{ matrix.pack_id }}
+      PACK_COUNT: '16'
+      SOURCEPACK_GENERATION: 'v2-20260902'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Execute pinned public source-pack worker
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/giovannifidel-collab/pfarma-ci/a003ef2e563e742ddfab609ac6af012309740f15/razzo/gio_os_build/source_pack_worker_v2.sh -o /tmp/gio-pack.sh
+          sha256sum /tmp/gio-pack.sh
+          bash /tmp/gio-pack.sh
