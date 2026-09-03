@@ -1,0 +1,35 @@
+name: GIO Remote Source-Pack Mount Probe
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/gio-remote-pack-mount-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Mount source pack 00 remotely over NBD
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nbdkit nbd-client squashfs-tools
+          sudo modprobe nbd nbds_max=64 max_part=0
+          url='https://github.com/giovannifidel-collab/razzo-shard-0151/releases/download/gio-a14-lavender-srcpack-v2-20260902-pack00/gio-a14-source-pack-0.sqfs.part-00'
+          rm -f /tmp/gio-pack0.sock /tmp/nbdkit-pack0.log
+          nbdkit -r -U /tmp/gio-pack0.sock --filter=retry curl url="$url" retry=5 > /tmp/nbdkit-pack0.log 2>&1 &
+          pid=$!
+          trap 'sudo nbd-client -d /dev/nbd0 >/dev/null 2>&1 || true; kill '$pid' >/dev/null 2>&1 || true' EXIT
+          for n in $(seq 1 30); do test -S /tmp/gio-pack0.sock && break; sleep 1; done
+          test -S /tmp/gio-pack0.sock
+          sudo nbd-client -unix /tmp/gio-pack0.sock /dev/nbd0
+          sudo blockdev --getsize64 /dev/nbd0
+          sudo unsquashfs -s /dev/nbd0
+          sudo mkdir -p /mnt/gio-pack0
+          sudo mount -t squashfs -o ro /dev/nbd0 /mnt/gio-pack0
+          test -d /mnt/gio-pack0
+          find /mnt/gio-pack0 -maxdepth 2 -mindepth 1 | head -30
+          echo REMOTE_PACK_MOUNT=PASS
