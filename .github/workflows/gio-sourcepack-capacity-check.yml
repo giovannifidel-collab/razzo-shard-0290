@@ -1,0 +1,49 @@
+name: GIO Source-Pack Capacity Check
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/gio-sourcepack-capacity-check.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - name: Measure exact source-pack footprint and runner storage
+        shell: bash
+        run: |
+          set -euo pipefail
+          repos=(
+            giovannifidel-collab/razzo-shard-0151
+            giovannifidel-collab/razzo-shard-0021
+            giovannifidel-collab/razzo-shard-0143
+            giovannifidel-collab/razzo-shard-0063
+            giovannifidel-collab/razzo-shard-0128
+            giovannifidel-collab/razzo-shard-0212
+            giovannifidel-collab/razzo-shard-0185
+            giovannifidel-collab/razzo-shard-0209
+            giovannifidel-collab/razzo-shard-0191
+            giovannifidel-collab/razzo-shard-0215
+            giovannifidel-collab/razzo-shard-0010
+            giovannifidel-collab/razzo-shard-0198
+            giovannifidel-collab/razzo-shard-0238
+            giovannifidel-collab/razzo-shard-0208
+            giovannifidel-collab/razzo-shard-0166
+            giovannifidel-collab/razzo-shard-0290
+          )
+          total=0
+          for i in $(seq 0 15); do
+            id=$(printf '%02d' "$i")
+            tag="gio-a14-lavender-srcpack-v2-20260902-pack${id}"
+            json=$(curl -fsSL "https://api.github.com/repos/${repos[$i]}/releases/tags/$tag")
+            bytes=$(jq '[.assets[] | select(.name|test("\\.sqfs\\.part-[0-9]+$")) | .size] | add // 0' <<<"$json")
+            printf 'PACK_%02d_BYTES=%s\n' "$i" "$bytes"
+            total=$((total+bytes))
+          done
+          echo "SOURCEPACK_TOTAL_BYTES=$total"
+          awk -v b="$total" 'BEGIN {printf "SOURCEPACK_TOTAL_GIB=%.2f\n", b/1024/1024/1024}'
+          df -hT / /mnt /dev/shm || true
+          lsblk -b -o NAME,SIZE,TYPE,FSTYPE,MOUNTPOINTS
+          free -h
