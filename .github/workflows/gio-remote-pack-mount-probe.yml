@@ -6,6 +6,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: gio-remote-sourcepack-probe
+  cancel-in-progress: true
 jobs:
   probe:
     runs-on: ubuntu-22.04
@@ -20,11 +23,11 @@ jobs:
           sudo modprobe nbd nbds_max=64 max_part=0
           url='https://github.com/giovannifidel-collab/razzo-shard-0151/releases/download/gio-a14-lavender-srcpack-v2-20260902-pack00/gio-a14-source-pack-0.sqfs.part-00'
           rm -f /tmp/gio-pack0.sock /tmp/nbdkit-pack0.log
-          nbdkit -r -U /tmp/gio-pack0.sock --filter=retry curl url="$url" retry=5 > /tmp/nbdkit-pack0.log 2>&1 &
+          nbdkit -r -U /tmp/gio-pack0.sock --filter=retry curl url="$url" retries=5 > /tmp/nbdkit-pack0.log 2>&1 &
           pid=$!
           trap 'sudo nbd-client -d /dev/nbd0 >/dev/null 2>&1 || true; kill '$pid' >/dev/null 2>&1 || true' EXIT
           for n in $(seq 1 30); do test -S /tmp/gio-pack0.sock && break; sleep 1; done
-          test -S /tmp/gio-pack0.sock
+          test -S /tmp/gio-pack0.sock || { cat /tmp/nbdkit-pack0.log; exit 1; }
           sudo nbd-client -unix /tmp/gio-pack0.sock /dev/nbd0
           sudo blockdev --getsize64 /dev/nbd0
           sudo unsquashfs -s /dev/nbd0
