@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   probe:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - name: Mount source pack 00 remotely over NBD
