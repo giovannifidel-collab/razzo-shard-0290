@@ -12,92 +12,35 @@ permissions:
 
 concurrency:
   group: gio-public-lavender-source-base
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+env:
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  BUILD_NUMBER: GIOPUBLICA14
+  BUILD_USERNAME: gio-public-fabric
+  BUILD_HOSTNAME: razzo-public-builder
 
 jobs:
   build:
+    name: public-lavender-target-files
     runs-on: ubuntu-24.04
-    timeout-minutes: 360
-    env:
-      AOSP_ROOT: /mnt/gio-a14
-      OUT_DIR_COMMON_BASE: /mnt/gio-out
-      GIO_BASE_SOURCE: crDroid-14.0-public-source
+    timeout-minutes: 350
     steps:
-      - name: Record executor and maximize ephemeral workspace
+      - name: Checkout public orchestration only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount verified 16-pack public Android source fabric
         shell: bash
         run: |
           set -euo pipefail
-          echo '=== BEFORE CLEANUP ==='
-          df -hT / /mnt || true
-          free -h || true
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
-          sudo docker image prune -af >/dev/null 2>&1 || true
-          sudo rm -rf /var/lib/apt/lists/* || true
-          sudo mkdir -p "$AOSP_ROOT" "$OUT_DIR_COMMON_BASE"
-          sudo chown -R "$USER:$USER" /mnt
-          echo '=== AFTER CLEANUP ==='
-          df -hT / /mnt || true
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
 
-      - name: Install Android build dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            bc bison build-essential curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf \
-            imagemagick lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev \
-            libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool \
-            squashfs-tools xsltproc zip zlib1g-dev python3 python-is-python3 openjdk-17-jdk
-          mkdir -p "$HOME/bin"
-          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o "$HOME/bin/repo"
-          chmod 0755 "$HOME/bin/repo"
-          echo "$HOME/bin" >> "$GITHUB_PATH"
-          git lfs install --skip-repo
-
-      - name: Initialize exact public Android 14 source graph
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/bin:$PATH"
-          cd "$AOSP_ROOT"
-          repo init \
-            -u https://github.com/crdroidandroid/android.git \
-            -b 14.0 \
-            --git-lfs \
-            --no-clone-bundle \
-            --depth=1 \
-            --partial-clone \
-            --clone-filter=blob:limit=10M
-          mkdir -p .repo/local_manifests
-          cat > .repo/local_manifests/gio-lavender-public.xml <<'XML'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <manifest>
-            <remote name="crdroid-gio" fetch="https://github.com/crdroidandroid" />
-            <project path="device/xiaomi/lavender" name="android_device_xiaomi_lavender" remote="crdroid-gio" revision="fd2a90e734a101fad046736970fa4dfb492d7d78" />
-            <project path="kernel/xiaomi/lavender" name="android_kernel_xiaomi_lavender" remote="crdroid-gio" revision="b7b27af5994f7afc11f69cfef194a8dc738842b4" />
-            <project path="vendor/xiaomi/lavender" name="proprietary_vendor_xiaomi_lavender" remote="crdroid-gio" revision="483e3e7ca5828c54d8b4408b87ee14069a8d027b" />
-          </manifest>
-          XML
-
-      - name: Sync source with fail-closed disk guard
-        shell: bash
-        run: |
-          set -euo pipefail
-          export PATH="$HOME/bin:$PATH"
-          cd "$AOSP_ROOT"
-          before="$(df -Pk /mnt | awk 'NR==2 {print $4}')"
-          repo sync -c --force-sync --optimized-fetch --prune --no-clone-bundle --no-tags -j4
-          after="$(df -Pk /mnt | awk 'NR==2 {print $4}')"
-          echo "SOURCE_SYNC_USED_KIB=$((before-after))"
-          du -sk "$AOSP_ROOT" | tee /mnt/gio-source-working-set.kib
-          df -h /mnt
-          test "$(git -C device/xiaomi/lavender rev-parse HEAD)" = fd2a90e734a101fad046736970fa4dfb492d7d78
-          test "$(git -C kernel/xiaomi/lavender rev-parse HEAD)" = b7b27af5994f7afc11f69cfef194a8dc738842b4
-          test "$(git -C vendor/xiaomi/lavender rev-parse HEAD)" = 483e3e7ca5828c54d8b4408b87ee14069a8d027b
-          repo manifest -r -o /mnt/gio-resolved-manifest.xml
-          sha256sum /mnt/gio-resolved-manifest.xml | tee /mnt/gio-resolved-manifest.sha256
-
-      - name: Add public generic GIO Secure Core hook
+      - name: Add generic private-core loading hook
         shell: bash
         run: |
           set -euo pipefail
@@ -108,71 +51,127 @@ jobs:
           path = Path('frameworks/base/services/java/com/android/server/SystemServer.java')
           text = path.read_text()
           marker = '// GIO_OS_PRIVATE_CORE_JAR_HOOK_V1'
-          if marker in text:
-              raise SystemExit(0)
-          anchors = [
-              'private void startOtherServices(@NonNull TimingsTraceAndSlog t) {',
-              'private void startOtherServices(TimingsTraceAndSlog t) {',
-          ]
-          anchor = next((a for a in anchors if a in text), None)
-          if anchor is None:
-              raise SystemExit('unsupported SystemServer startOtherServices anchor')
-          hook = '''\n        // GIO_OS_PRIVATE_CORE_JAR_HOOK_V1\n        try {\n            mSystemServiceManager.startServiceFromJar(\n                    "com.android.server.gioos.GioOsManagerService",\n                    "/system/framework/gioos-services.jar");\n        } catch (RuntimeException e) {\n            Slog.i(TAG, "GIO OS private Secure Core is not installed in this public base");\n        }\n'''
-          path.write_text(text.replace(anchor, anchor + hook, 1))
+          if marker not in text:
+              anchors = [
+                  'private void startOtherServices(@NonNull TimingsTraceAndSlog t) {',
+                  'private void startOtherServices(TimingsTraceAndSlog t) {',
+              ]
+              anchor = next((a for a in anchors if a in text), None)
+              if anchor is None:
+                  raise SystemExit('unsupported SystemServer startOtherServices anchor')
+              hook = '''\n        // GIO_OS_PRIVATE_CORE_JAR_HOOK_V1\n        try {\n            mSystemServiceManager.startServiceFromJar(\n                    "com.android.server.gioos.GioOsManagerService",\n                    "/system/framework/gioos-services.jar");\n        } catch (RuntimeException e) {\n            Slog.i(TAG, "GIO OS private Secure Core is not installed in this public base");\n        }\n'''
+              path.write_text(text.replace(anchor, anchor + hook, 1))
           verify = path.read_text()
           required = [marker, 'startServiceFromJar(', 'com.android.server.gioos.GioOsManagerService', '/system/framework/gioos-services.jar']
           if not all(x in verify for x in required):
               raise SystemExit('generic GIO jar hook verification failed')
           print('GIO_PUBLIC_PRIVATE_CORE_HOOK=PASS')
           PY
-          ! find "$AOSP_ROOT" -path '*/vendor/gioos/*' -type f -print -quit | grep -q .
-          ! grep -R --exclude='SystemServer.java' -l 'class GioOsManagerService' "$AOSP_ROOT/frameworks" 2>/dev/null | grep -q .
+          test ! -e vendor/gioos
+          ! grep -R --exclude='SystemServer.java' -l 'class GioOsManagerService' frameworks 2>/dev/null | grep -q .
 
-      - name: Source-build unsigned public target-files
+      - name: Build unsigned public target-files and OTA tools
         shell: bash
         run: |
-          set -euo pipefail
+          set -eo pipefail
           cd "$AOSP_ROOT"
+          set +u
           source build/envsetup.sh
-          lunch lineage_lavender-userdebug
-          export BUILD_NUMBER=GIOPUBLICA14
-          export BUILD_USERNAME=gio-public-fabric
-          export BUILD_HOSTNAME=razzo-shard
-          m -j2 target-files-package otatools-package
-          df -h /mnt
+          lunch lineage_lavender-ap2a-userdebug
+          export BUILD_NUMBER="$BUILD_NUMBER"
+          export BUILD_USERNAME="$BUILD_USERNAME"
+          export BUILD_HOSTNAME="$BUILD_HOSTNAME"
 
-      - name: Collect content-addressed public base artifacts
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics"
+          : > "$RUNNER_TEMP/gio-public-build.log"
+          : > "$RUNNER_TEMP/gio-public-resources.log"
+          (
+            while true; do
+              printf '\n=== PUBLIC_RUNNER_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
+              df -hT / /mnt || true
+              free -h || true
+              ps -eo pid,ppid,pcpu,pmem,rss,comm --sort=-rss | head -n 12 || true
+              sleep 600
+            done
+          ) 2>&1 | tee -a "$RUNNER_TEMP/gio-public-resources.log" &
+          MON_PID=$!
+
+          set +e
+          nice -n 5 ionice -c2 -n5 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j4 \
+            > >(tee -a "$RUNNER_TEMP/gio-public-build.log") 2>&1
+          BUILD_RC=$?
+          set -e
+          kill "$MON_PID" >/dev/null 2>&1 || true
+          wait "$MON_PID" >/dev/null 2>&1 || true
+
+          if [ "$BUILD_RC" -ne 0 ]; then
+            tail -n 12000 "$RUNNER_TEMP/gio-public-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
+            cp "$RUNNER_TEMP/gio-public-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
+            { df -hT / /mnt; free -h; } > "$GITHUB_WORKSPACE/diagnostics/final-resources.txt" 2>&1 || true
+            printf 'build_rc=%s\nsourcepack_generation=%s\nstrategy=public-diskless-16pack-j4\n' "$BUILD_RC" "$GEN" \
+              > "$GITHUB_WORKSPACE/diagnostics/FAILURE.env"
+            exit "$BUILD_RC"
+          fi
+
+      - name: Collect verified public base artifacts
         shell: bash
         run: |
           set -euo pipefail
-          product_out="$OUT_DIR_COMMON_BASE/$(basename "$AOSP_ROOT")/target/product/lavender"
-          if [ ! -d "$product_out" ]; then
-            product_out="$(find "$OUT_DIR_COMMON_BASE" -type d -path '*/target/product/lavender' | head -1)"
-          fi
-          test -n "$product_out" -a -d "$product_out"
-          target_files="$(find "$OUT_DIR_COMMON_BASE" -type f -name '*target_files*.zip' | sort | tail -1)"
-          otatools="$(find "$OUT_DIR_COMMON_BASE" -type f -name 'otatools.zip' | sort | tail -1)"
-          test -n "$target_files" -a -f "$target_files"
           mkdir -p "$GITHUB_WORKSPACE/gio-public-base"
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$target_files" -a -f "$target_files"
+          test -n "$otatools" -a -f "$otatools"
+          unzip -t "$target_files" >/dev/null
+          unzip -t "$otatools" >/dev/null
           cp "$target_files" "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip"
-          if [ -n "$otatools" ] && [ -f "$otatools" ]; then cp "$otatools" "$GITHUB_WORKSPACE/gio-public-base/otatools.zip"; fi
-          cp /mnt/gio-resolved-manifest.xml "$GITHUB_WORKSPACE/gio-public-base/"
-          cp /mnt/gio-resolved-manifest.sha256 "$GITHUB_WORKSPACE/gio-public-base/"
-          cp /mnt/gio-source-working-set.kib "$GITHUB_WORKSPACE/gio-public-base/"
-          sha256sum "$GITHUB_WORKSPACE/gio-public-base/"* | tee "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
+          cp "$otatools" "$GITHUB_WORKSPACE/gio-public-base/otatools.zip"
+          cp "$RUNNER_TEMP/gio-public-build.log" "$GITHUB_WORKSPACE/gio-public-base/build.log"
+          sha256sum "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip" \
+                    "$GITHUB_WORKSPACE/gio-public-base/otatools.zip" \
+            > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
           printf '%s\n' \
-            'provenance=public-source-build' \
+            'provenance=public-diskless-sourcepack-build' \
             'target=lavender' \
             'android=14' \
+            'release=ap2a' \
+            'sourcepack_generation=v2-20260902' \
+            'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' \
+            'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' \
+            'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' \
             'generic_gio_private_jar_hook=true' \
             'private_gio_source_present=false' \
             'signing_keys_present=false' \
+            'hardware_validated=false' \
             > "$GITHUB_WORKSPACE/gio-public-base/PROVENANCE.env"
+          echo PUBLIC_TARGET_FILES=READY
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          name: gio-lavender-public-source-base-${{ github.sha }}
+          name: gio-public-lavender-build-diagnostics
+          path: diagnostics/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Upload unsigned public lavender base
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-lavender-public-target-files-${{ github.sha }}
           path: gio-public-base/
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
           if-no-files-found: error
+
+      - name: Cleanup public remote mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
