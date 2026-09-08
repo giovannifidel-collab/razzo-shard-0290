@@ -1,0 +1,351 @@
+name: GIO OS Public 30-Shard Compile Fabric
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-30-shard-build.yml'
+      - 'ci/gio_public_compile_shard.sh'
+      - 'ci/gio_public_apply_hook.sh'
+      - 'ci/gio_public_diskless_setup.sh'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gio-public-30-shard-compile
+  cancel-in-progress: false
+
+env:
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  BUILD_NUMBER: GIOPUBLICA14SHARD30
+  BUILD_USERNAME: gio-public-fabric
+  BUILD_HOSTNAME: razzo-public-builder
+
+jobs:
+  prepare:
+    name: prepare-public-cache-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+    steps:
+      - name: Create deterministic compile-cache release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="gio-a14-lavender-compilecache-v1-${GITHUB_SHA:0:12}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "GIO OS Lavender 30-shard compile cache ${GITHUB_SHA:0:12}" \
+              --notes "Public-only Android 14/Lavender compile-cache capsules. No private GIO source or signing keys." \
+              --prerelease
+          fi
+          echo "PUBLIC_CACHE_RELEASE=$TAG"
+
+  warm-cache:
+    name: compile-shard-${{ matrix.shard }}
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard:
+          - '00'
+          - '01'
+          - '02'
+          - '03'
+          - '04'
+          - '05'
+          - '06'
+          - '07'
+          - '08'
+          - '09'
+          - '10'
+          - '11'
+          - '12'
+          - '13'
+          - '14'
+          - '15'
+          - '16'
+          - '17'
+          - '18'
+          - '19'
+          - '20'
+          - '21'
+          - '22'
+          - '23'
+          - '24'
+          - '25'
+          - '26'
+          - '27'
+          - '28'
+          - '29'
+    env:
+      LOCALIZE_PUBLIC_PACKS: '1'
+      PUBLIC_OUT_RESERVE_GB: '28'
+      TAG: ${{ needs.prepare.outputs.tag }}
+      SHARD: ${{ matrix.shard }}
+    steps:
+      - name: Checkout public orchestration only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount verified 16-pack Android source fabric
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+
+      - name: Apply deterministic generic GIO private-core hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Compile bounded shard and seal ccache capsule
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gio-capsules"
+          CAPSULE="$RUNNER_TEMP/gio-capsules/ccache-shard-${SHARD}.tar"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_compile_shard.sh" \
+            "$SHARD" "$AOSP_ROOT" "$OUT_ROOT" "$CAPSULE"
+          test -s "$CAPSULE"
+          test -s "${CAPSULE}.sha256"
+          test -s "${CAPSULE}.env"
+
+      - name: Publish compile-cache capsule to Release
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CAPSULE="$RUNNER_TEMP/gio-capsules/ccache-shard-${SHARD}.tar"
+          if [ -s "$CAPSULE" ]; then
+            gh release upload "$TAG" \
+              "$CAPSULE" "${CAPSULE}.sha256" "${CAPSULE}.env" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            echo "CACHE_CAPSULE_${SHARD}=PUBLISHED"
+          else
+            echo "CACHE_CAPSULE_${SHARD}=ABSENT"
+          fi
+
+      - name: Cleanup shard mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
+
+  assemble-public-base:
+    name: assemble-public-target-files-from-30-shard-cache
+    needs: [prepare, warm-cache]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      LOCALIZE_PUBLIC_PACKS: '1'
+      PUBLIC_OUT_RESERVE_GB: '40'
+      TAG: ${{ needs.prepare.outputs.tag }}
+      CCACHE_DIR: /mnt/gio-final-ccache
+      CCACHE_MAXSIZE: 4G
+      USE_CCACHE: '1'
+    steps:
+      - name: Checkout public orchestration only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount verified 16-pack Android source fabric
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+
+      - name: Apply deterministic generic GIO private-core hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Import and verify all available compile-cache capsules
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gio-cache-download" "$CCACHE_DIR"
+          gh release download "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ccache-shard-*.tar' \
+            --pattern 'ccache-shard-*.tar.sha256' \
+            --dir "$RUNNER_TEMP/gio-cache-download" || true
+
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "PUBLIC_CACHE_CAPSULE_COUNT=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 8
+
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+          du -sh "$CCACHE_DIR" || true
+
+      - name: Build public target-files and otatools with merged cache
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          set +u
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          export BUILD_NUMBER="$BUILD_NUMBER"
+          export BUILD_USERNAME="$BUILD_USERNAME"
+          export BUILD_HOSTNAME="$BUILD_HOSTNAME"
+          set -u
+
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics" "$GITHUB_WORKSPACE/gio-public-base"
+          : > "$RUNNER_TEMP/gio-final-build.log"
+          : > "$RUNNER_TEMP/gio-final-resources.log"
+          (
+            while true; do
+              printf '\n=== FINAL_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
+              df -hT / /mnt || true
+              free -h || true
+              ccache --show-stats || true
+              sleep 600
+            done
+          ) > "$RUNNER_TEMP/gio-final-resources.log" 2>&1 &
+          MON_PID=$!
+
+          set +e
+          timeout --signal=TERM --kill-after=30s 315m \
+            nice -n 5 ionice -c2 -n5 \
+            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j4 \
+            > >(tee -a "$RUNNER_TEMP/gio-final-build.log") 2>&1
+          BUILD_RC=$?
+          set -e
+          kill "$MON_PID" >/dev/null 2>&1 || true
+          wait "$MON_PID" >/dev/null 2>&1 || true
+
+          cp "$RUNNER_TEMP/gio-final-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
+          tail -n 15000 "$RUNNER_TEMP/gio-final-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
+          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j4\nsourcepack_generation=%s\n' \
+            "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics/BUILD.env"
+
+          if [ "$BUILD_RC" -ne 0 ]; then
+            exit "$BUILD_RC"
+          fi
+
+      - name: Collect and verify public base
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$target_files" -a -f "$target_files"
+          test -n "$otatools" -a -f "$otatools"
+          unzip -t "$target_files" >/dev/null
+          unzip -t "$otatools" >/dev/null
+
+          cp "$target_files" "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip"
+          cp "$otatools" "$GITHUB_WORKSPACE/gio-public-base/otatools.zip"
+          sha256sum "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip" \
+                    "$GITHUB_WORKSPACE/gio-public-base/otatools.zip" \
+            > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
+          printf '%s\n' \
+            'schema=gio.os.public-base.v2' \
+            'strategy=30-shard-public-ccache-merge-final-j4' \
+            'target=lavender' \
+            'android=14' \
+            'release=ap2a' \
+            'sourcepack_generation=v2-20260902' \
+            'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' \
+            'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' \
+            'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' \
+            'generic_gio_private_jar_hook=true' \
+            'private_gio_source_present=false' \
+            'signing_keys_present=false' \
+            'hardware_validated=false' \
+            > "$GITHUB_WORKSPACE/gio-public-base/PROVENANCE.env"
+          echo "PUBLIC_TARGET_FILES=READY"
+
+      - name: Publish verified public base to Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/gio-public-base"
+          for f in lavender-public-target_files.zip otatools.zip SHA256SUMS PROVENANCE.env; do
+            test -s "$f"
+            size="$(stat -c%s "$f")"
+            if [ "$size" -gt 1900000000 ]; then
+              split -b 1800M -d -a 3 "$f" "${f}.part-"
+              gh release upload "$TAG" "${f}.part-"* --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+            fi
+          done
+          echo "PUBLIC_BASE_RELEASED=$TAG"
+
+      - name: Publish final diagnostics on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          for f in "$GITHUB_WORKSPACE"/diagnostics/*; do
+            [ -f "$f" ] || continue
+            gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber || true
+          done
+
+      - name: Cleanup final mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
