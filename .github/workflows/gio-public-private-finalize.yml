@@ -1,0 +1,303 @@
+name: GIO OS Ephemeral Private Finalizer
+
+on:
+  workflow_run:
+    workflows: ['GIO OS Public 30-Shard Compile Fabric']
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      public_head_sha:
+        description: 'Successful 30-shard fabric head SHA'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GIO_AUTHORITATIVE_SHA: 31103989996a664dff385896143dccd03072cdf6
+  SOURCEPACK_GENERATION: v2-20260902
+  DEVICE_SHA: fd2a90e734a101fad046736970fa4dfb492d7d78
+  KERNEL_SHA: b7b27af5994f7afc11f69cfef194a8dc738842b4
+  VENDOR_SHA: 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  CCACHE_DIR: /tmp/gio-private-final-ccache
+  CCACHE_MAXSIZE: 4G
+
+jobs:
+  finalize:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - name: Checkout public orchestration only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve and verify successful public base release
+        id: public
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          AUTO_SHA: ${{ github.event.workflow_run.head_sha }}
+          MANUAL_SHA: ${{ inputs.public_head_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = workflow_run ]; then
+            PUBLIC_SHA="$AUTO_SHA"
+          else
+            PUBLIC_SHA="$MANUAL_SHA"
+          fi
+          test -n "$PUBLIC_SHA"
+          TAG="gio-a14-lavender-compilecache-v1-${PUBLIC_SHA:0:12}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "public_sha=$PUBLIC_SHA" >> "$GITHUB_OUTPUT"
+          rm -rf "$RUNNER_TEMP/public-proof"
+          mkdir -p "$RUNNER_TEMP/public-proof"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'PROVENANCE.env' --pattern 'SHA256SUMS' \
+            --dir "$RUNNER_TEMP/public-proof"
+          test -s "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx 'sourcepack_generation=v2-20260902' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx 'target=lavender' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx "device_sha=$DEVICE_SHA" "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx "kernel_sha=$KERNEL_SHA" "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx "vendor_sha=$VENDOR_SHA" "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx 'private_gio_source_present=false' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          grep -Fx 'signing_keys_present=false' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          echo "PUBLIC_BASE_PROVENANCE=PASS"
+
+      - name: Mount exact public Android source fabric
+        shell: bash
+        env:
+          LOCALIZE_PUBLIC_PACKS: '1'
+          PUBLIC_OUT_RESERVE_GB: '40'
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" \
+            "$AOSP_ROOT" "$OUT_ROOT" "$SOURCEPACK_GENERATION"
+
+      - name: Import verified public compile caches
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.public.outputs.tag }}
+        run: |
+          set -euo pipefail
+          rm -rf "$RUNNER_TEMP/gio-cache-download" "$CCACHE_DIR"
+          mkdir -p "$RUNNER_TEMP/gio-cache-download" "$CCACHE_DIR"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ccache-shard-*.tar' \
+            --pattern 'ccache-shard-*.tar.sha256' \
+            --dir "$RUNNER_TEMP/gio-cache-download"
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "FINALIZER_CACHE_CAPSULES=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 8
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+
+      - name: Acquire exact private GIO source ephemerally
+        shell: bash
+        env:
+          GIO_PRIVATE_READ_TOKEN: ${{ secrets.GIO_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GIO_PRIVATE_READ_TOKEN:-}" ]; then
+            echo 'GIO_PRIVATE_READ_TOKEN secret is required for the ephemeral private-source handoff.' >&2
+            exit 78
+          fi
+          PRIVATE="$RUNNER_TEMP/gio-private-source"
+          rm -rf "$PRIVATE"
+          ASKPASS="$RUNNER_TEMP/gio-askpass.sh"
+          cat > "$ASKPASS" <<'EOS'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *) printf '%s\n' "$GIO_PRIVATE_READ_TOKEN" ;;
+          esac
+          EOS
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          export GIT_TERMINAL_PROMPT=0
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/giovannifidel-collab/gio-OS.git "$PRIVATE"
+          git -C "$PRIVATE" fetch --depth=1 origin "$GIO_AUTHORITATIVE_SHA"
+          git -C "$PRIVATE" checkout --detach "$GIO_AUTHORITATIVE_SHA"
+          test "$(git -C "$PRIVATE" rev-parse HEAD)" = "$GIO_AUTHORITATIVE_SHA"
+          rm -f "$ASKPASS"
+          unset GIT_ASKPASS GIO_PRIVATE_READ_TOKEN
+          echo "PRIVATE_GIO_SOURCE_SHA=PASS"
+
+      - name: Inject private core and patch Android 14 framework
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          mkdir -p vendor
+          rm -rf vendor/gioos
+          cp -a "$RUNNER_TEMP/gio-private-source" vendor/gioos
+          test "$(git -C vendor/gioos rev-parse HEAD)" = "$GIO_AUTHORITATIVE_SHA"
+          PRODUCT=device/xiaomi/lavender/lineage_lavender.mk
+          HOOK='$(call inherit-product, vendor/gioos/build/lavender/gioos_product_overlay.mk)'
+          if ! grep -Fq "$HOOK" "$PRODUCT"; then
+            printf '\n# gio-OS 1.0 product overlay\n%s\n' "$HOOK" >> "$PRODUCT"
+          fi
+          python3 vendor/gioos/integration/android14/patch_framework.py "$AOSP_ROOT"
+          python3 vendor/gioos/integration/android14/patch_framework.py "$AOSP_ROOT" --check
+          rm -rf out
+          ln -s "$OUT_ROOT" out
+          make -C vendor/gioos test
+          echo "PRIVATE_GIO_INJECTION=PASS"
+
+      - name: Generate ephemeral RC signing keys
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          sec=build/make/target/product/security
+          test -d "$sec"
+          mapfile -t pairs < <(find "$sec" -maxdepth 1 -type f -name '*.pk8' -printf '%f\n' | sed 's/\.pk8$//' | sort -u)
+          test "${#pairs[@]}" -gt 0
+          KEY_TMP="$RUNNER_TEMP/gio-signing-keys"
+          rm -rf "$KEY_TMP"
+          mkdir -p "$KEY_TMP"
+          for name in "${pairs[@]}"; do
+            pem="$KEY_TMP/${name}.pem"
+            openssl genrsa -out "$pem" 3072 >/dev/null 2>&1
+            openssl req -new -x509 -key "$pem" -out "$sec/${name}.x509.pem" -days 3650 \
+              -subj "/C=IT/O=GIO OS/OU=RC Signing/CN=GIO OS ${name} RC"
+            openssl pkcs8 -in "$pem" -topk8 -outform DER -out "$sec/${name}.pk8" -nocrypt
+          done
+          echo "EPHEMERAL_RC_KEYS=READY"
+
+      - name: Build final GIO OS RC with merged public cache
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export BUILD_NUMBER=GIOOS100RC0
+          export BUILD_USERNAME=gio-os
+          export BUILD_HOSTNAME=razzo-ephemeral-finalizer
+          set +u
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/final" "$GITHUB_WORKSPACE/diagnostics"
+          : > "$RUNNER_TEMP/gio-final-private.log"
+          set +e
+          timeout --signal=TERM --kill-after=30s 315m \
+            nice -n 5 ionice -c2 -n5 \
+            bash -c 'set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug >/dev/null; mka bacon -j2' \
+            > >(tee -a "$RUNNER_TEMP/gio-final-private.log") 2>&1
+          rc=$?
+          set -e
+          tail -n 15000 "$RUNNER_TEMP/gio-final-private.log" > "$GITHUB_WORKSPACE/diagnostics/private-build-tail.log" || true
+          printf 'build_rc=%s\n' "$rc" > "$GITHUB_WORKSPACE/diagnostics/PRIVATE_BUILD.env"
+          test "$rc" -eq 0
+
+      - name: Verify final installable ZIP and provenance
+        shell: bash
+        env:
+          PUBLIC_SHA: ${{ steps.public.outputs.public_sha }}
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          out=out/target/product/lavender
+          zip="$(find "$out" -maxdepth 1 -type f -name '*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$zip" -a -f "$zip"
+          unzip -t "$zip" >/dev/null
+          cp "$zip" "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip"
+          sha256sum "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip" > "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip.sha256"
+          printf '%s\n' "$GIO_AUTHORITATIVE_SHA" > "$GITHUB_WORKSPACE/final/.gioos-source-sha"
+          printf '%s\n' \
+            'schema=gio.os.rc.provenance.v1' \
+            "source_sha=$GIO_AUTHORITATIVE_SHA" \
+            "public_fabric_sha=$PUBLIC_SHA" \
+            "sourcepack_generation=$SOURCEPACK_GENERATION" \
+            'target=lavender' \
+            'android=14' \
+            'release=ap2a' \
+            "device_sha=$DEVICE_SHA" \
+            "kernel_sha=$KERNEL_SHA" \
+            "vendor_sha=$VENDOR_SHA" \
+            'channel=rc' \
+            'hardware_validated=false' \
+            'private_source_ephemeral=true' \
+            'signing_keys_published=false' \
+            > "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+          test "$(cat "$GITHUB_WORKSPACE/final/.gioos-source-sha")" = "$GIO_AUTHORITATIVE_SHA"
+          grep -Fx "source_sha=$GIO_AUTHORITATIVE_SHA" "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+          grep -Fx 'sourcepack_generation=v2-20260902' "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+          grep -Fx 'target=lavender' "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+          grep -Fx 'hardware_validated=false' "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+          echo "FINAL_GIO_OS_ZIP=VERIFIED"
+
+      - name: Publish verified GIO OS RC
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=gio-os-1.0.0-rc0-lavender
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease \
+              --title 'GIO OS 1.0.0-rc0 Lavender' \
+              --notes 'Hardware-unvalidated RC. Private source and signing keys are not published.'
+          fi
+          gh release upload "$TAG" \
+            "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip" \
+            "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip.sha256" \
+            "$GITHUB_WORKSPACE/final/.gioos-source-sha" \
+            "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Publish diagnostics on failure
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          TAG="${{ steps.public.outputs.tag }}"
+          [ -n "$TAG" ] || exit 0
+          for f in "$GITHUB_WORKSPACE"/diagnostics/*; do
+            [ -f "$f" ] || continue
+            gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber || true
+          done
+
+      - name: Destroy private source and signing material
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf "$RUNNER_TEMP/gio-private-source" "$RUNNER_TEMP/gio-signing-keys" "$RUNNER_TEMP/gio-askpass.sh"
+          rm -rf "$AOSP_ROOT/vendor/gioos" 2>/dev/null || true
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
+          echo 'PRIVATE_MATERIAL_DESTROYED=YES'
