@@ -49,8 +49,6 @@ cd "$AOSP_ROOT"
 set +u
 export USE_CCACHE=1
 unset CCACHE_DISABLE || true
-# GitHub-hosted runners expose /mnt as root-owned. Keep writable shard state
-# under RUNNER_TEMP while preserving deterministic cache contents.
 CACHE_BASE="${RUNNER_TEMP:-/tmp}"
 export CCACHE_DIR="$CACHE_BASE/gio-ccache-$SHARD"
 export CCACHE_MAXSIZE="128M"
@@ -69,8 +67,6 @@ ccache --set-config=compression=true >/dev/null || true
 ccache --set-config=compression_level=5 >/dev/null || true
 ccache --zero-stats >/dev/null || true
 
-# Each goal gets a bounded slice. A goal may be absent on this branch; that is
-# non-fatal for a cache-warming shard. Successful compiler outputs remain useful.
 LOG="${CAPSULE%.tar}.log"
 : > "$LOG"
 for goal in "${goals[@]}"; do
@@ -78,7 +74,7 @@ for goal in "${goals[@]}"; do
   set +e
   timeout --signal=TERM --kill-after=30s 70m \
     nice -n 5 ionice -c2 -n5 \
-    build/soong/soong_ui.bash --make-mode "$goal" -j4 \
+    build/soong/soong_ui.bash --make-mode "$goal" -j2 \
     >> "$LOG" 2>&1
   rc=$?
   set -e
