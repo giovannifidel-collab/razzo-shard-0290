@@ -1,0 +1,48 @@
+name: GIO OS Private Handoff Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-private-handoff-probe.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GIO_AUTHORITATIVE_SHA: 31103989996a664dff385896143dccd03072cdf6
+    steps:
+      - name: Verify private read-only handoff without checkout
+        shell: bash
+        env:
+          GIO_PRIVATE_READ_TOKEN: ${{ secrets.GIO_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GIO_PRIVATE_READ_TOKEN:-}" ]; then
+            echo 'PRIVATE_HANDOFF_SECRET=MISSING'
+            exit 78
+          fi
+          ASKPASS="$RUNNER_TEMP/gio-askpass.sh"
+          cat > "$ASKPASS" <<'EOS'
+          #!/usr/bin/env bash
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *) printf '%s\n' "$GIO_PRIVATE_READ_TOKEN" ;;
+          esac
+          EOS
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          export GIT_TERMINAL_PROMPT=0
+          d="$RUNNER_TEMP/gio-private-probe"
+          git init -q "$d"
+          git -C "$d" remote add origin https://github.com/giovannifidel-collab/gio-OS.git
+          git -C "$d" fetch -q --depth=1 origin "$GIO_AUTHORITATIVE_SHA"
+          test "$(git -C "$d" rev-parse FETCH_HEAD)" = "$GIO_AUTHORITATIVE_SHA"
+          rm -rf "$d" "$ASKPASS"
+          unset GIT_ASKPASS GIO_PRIVATE_READ_TOKEN
+          echo 'PRIVATE_HANDOFF=PASS'
