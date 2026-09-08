@@ -15,7 +15,7 @@ permissions:
 
 concurrency:
   group: gio-public-30-shard-compile
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   GEN: v2-20260902
@@ -259,7 +259,7 @@ jobs:
           set +e
           timeout --signal=TERM --kill-after=30s 315m \
             nice -n 5 ionice -c2 -n5 \
-            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j4 \
+            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j2 \
             > >(tee -a "$RUNNER_TEMP/gio-final-build.log") 2>&1
           BUILD_RC=$?
           set -e
@@ -268,7 +268,7 @@ jobs:
 
           cp "$RUNNER_TEMP/gio-final-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
           tail -n 15000 "$RUNNER_TEMP/gio-final-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
-          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j4\nsourcepack_generation=%s\n' \
+          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j2\nsourcepack_generation=%s\n' \
             "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics/BUILD.env"
 
           if [ "$BUILD_RC" -ne 0 ]; then
@@ -293,7 +293,7 @@ jobs:
             > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
           printf '%s\n' \
             'schema=gio.os.public-base.v2' \
-            'strategy=30-shard-public-ccache-merge-final-j4' \
+            'strategy=30-shard-public-ccache-merge-final-j2' \
             'target=lavender' \
             'android=14' \
             'release=ap2a' \
