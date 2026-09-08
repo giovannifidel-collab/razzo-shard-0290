@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/gio-public-lavender-base.yml'
+      - 'ci/gio_public_diskless_setup.sh'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +22,8 @@ env:
   BUILD_NUMBER: GIOPUBLICA14
   BUILD_USERNAME: gio-public-fabric
   BUILD_HOSTNAME: razzo-public-builder
+  LOCALIZE_PUBLIC_PACKS: '1'
+  PUBLIC_OUT_RESERVE_GB: '48'
 
 jobs:
   build:
@@ -67,9 +70,6 @@ jobs:
               raise SystemExit('generic GIO jar hook verification failed')
           print('GIO_PUBLIC_PRIVATE_CORE_HOOK=PASS')
           PY
-          # Fail closed on the only private-source namespace used by GIO OS.
-          # Avoid recursive scans across the remote NBD fabric: run #5 spent ~43 minutes
-          # walking frameworks/ and gained no additional trust boundary.
           test ! -e vendor/gioos
           test ! -e frameworks/base/services/core/java/com/android/server/gioos
 
@@ -79,8 +79,6 @@ jobs:
           set -eo pipefail
           cd "$AOSP_ROOT"
           set +u
-          # Force ccache off before envsetup/lunch; on run #5 setting CCACHE_DISABLE
-          # afterwards was too late and crDroid re-enabled an empty 40G cache.
           export USE_CCACHE=0
           export CCACHE_DISABLE=1
           unset CCACHE_EXEC || true
@@ -119,7 +117,7 @@ jobs:
             tail -n 12000 "$RUNNER_TEMP/gio-public-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
             cp "$RUNNER_TEMP/gio-public-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
             { df -hT / /mnt; free -h; } > "$GITHUB_WORKSPACE/diagnostics/final-resources.txt" 2>&1 || true
-            printf 'build_rc=%s\nsourcepack_generation=%s\nstrategy=public-diskless-16pack-j4-ccache-hard-off-no-nbd-tree-scan\n' "$BUILD_RC" "$GEN" \
+            printf 'build_rc=%s\nsourcepack_generation=%s\nstrategy=public-localized-pack-preferred-j4\n' "$BUILD_RC" "$GEN" \
               > "$GITHUB_WORKSPACE/diagnostics/FAILURE.env"
             exit "$BUILD_RC"
           fi
@@ -142,7 +140,7 @@ jobs:
                     "$GITHUB_WORKSPACE/gio-public-base/otatools.zip" \
             > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
           printf '%s\n' \
-            'provenance=public-diskless-sourcepack-build' \
+            'provenance=public-sourcepack-build-localized-preferred' \
             'target=lavender' \
             'android=14' \
             'release=ap2a' \
