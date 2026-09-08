@@ -60,7 +60,9 @@ jobs:
     continue-on-error: true
     strategy:
       fail-fast: false
-      max-parallel: 20
+      # 20 simultaneous Android/Soong builds caused hosted-runner SIGTERM/143.
+      # Keep 30 logical shards but run them in six-wide waves.
+      max-parallel: 6
       matrix:
         shard:
           - '00'
@@ -94,7 +96,9 @@ jobs:
           - '28'
           - '29'
     env:
-      LOCALIZE_PUBLIC_PACKS: '1'
+      # Warmers only need on-demand source reads. Avoid downloading the full
+      # 16-pack fabric on every concurrent runner (bandwidth/403 pressure).
+      LOCALIZE_PUBLIC_PACKS: '0'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
       SHARD: ${{ matrix.shard }}
@@ -164,10 +168,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     env:
+      # The single assembler benefits from fully local source packs.
       LOCALIZE_PUBLIC_PACKS: '1'
       PUBLIC_OUT_RESERVE_GB: '40'
       TAG: ${{ needs.prepare.outputs.tag }}
-      CCACHE_DIR: /mnt/gio-final-ccache
+      CCACHE_DIR: ${{ runner.temp }}/gio-final-ccache
       CCACHE_MAXSIZE: 4G
       USE_CCACHE: '1'
     steps:
