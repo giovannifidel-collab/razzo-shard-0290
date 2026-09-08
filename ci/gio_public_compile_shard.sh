@@ -49,7 +49,10 @@ cd "$AOSP_ROOT"
 set +u
 export USE_CCACHE=1
 unset CCACHE_DISABLE || true
-export CCACHE_DIR="/mnt/gio-ccache-$SHARD"
+# GitHub-hosted runners expose /mnt as root-owned. Keep writable shard state
+# under RUNNER_TEMP while preserving deterministic cache contents.
+CACHE_BASE="${RUNNER_TEMP:-/tmp}"
+export CCACHE_DIR="$CACHE_BASE/gio-ccache-$SHARD"
 export CCACHE_MAXSIZE="128M"
 export CCACHE_BASEDIR="$AOSP_ROOT"
 export CCACHE_NOHASHDIR=true
@@ -80,7 +83,6 @@ for goal in "${goals[@]}"; do
   rc=$?
   set -e
   echo "=== SHARD=$SHARD GOAL=$goal RC=$rc END=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
-  # Stop once the cache is effectively full; later goals would mostly evict useful entries.
   size_bytes="$(du -sb "$CCACHE_DIR" 2>/dev/null | awk '{print $1}')"
   if [ "${size_bytes:-0}" -ge 120000000 ]; then
     break
@@ -89,8 +91,6 @@ done
 
 ccache --cleanup >/dev/null || true
 ccache --show-stats | tee -a "$LOG" || true
-
-# Remove volatile lock/temp/stat files so capsules merge cleanly across runners.
 find "$CCACHE_DIR" -type f \( -name '*.lock' -o -name 'stats' -o -name 'stats.lock' \) -delete 2>/dev/null || true
 find "$CCACHE_DIR" -type d -name tmp -prune -exec rm -rf {} + 2>/dev/null || true
 
