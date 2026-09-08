@@ -26,7 +26,7 @@ jobs:
   build:
     name: public-lavender-target-files
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 360
     steps:
       - name: Checkout public orchestration only
         uses: actions/checkout@v4
@@ -81,6 +81,7 @@ jobs:
           export BUILD_NUMBER="$BUILD_NUMBER"
           export BUILD_USERNAME="$BUILD_USERNAME"
           export BUILD_HOSTNAME="$BUILD_HOSTNAME"
+          export CCACHE_DISABLE=1
 
           mkdir -p "$GITHUB_WORKSPACE/diagnostics"
           : > "$RUNNER_TEMP/gio-public-build.log"
@@ -108,7 +109,7 @@ jobs:
             tail -n 12000 "$RUNNER_TEMP/gio-public-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
             cp "$RUNNER_TEMP/gio-public-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
             { df -hT / /mnt; free -h; } > "$GITHUB_WORKSPACE/diagnostics/final-resources.txt" 2>&1 || true
-            printf 'build_rc=%s\nsourcepack_generation=%s\nstrategy=public-diskless-16pack-j4\n' "$BUILD_RC" "$GEN" \
+            printf 'build_rc=%s\nsourcepack_generation=%s\nstrategy=public-diskless-16pack-j4-no-ccache\n' "$BUILD_RC" "$GEN" \
               > "$GITHUB_WORKSPACE/diagnostics/FAILURE.env"
             exit "$BUILD_RC"
           fi
