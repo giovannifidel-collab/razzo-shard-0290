@@ -9,6 +9,7 @@ fi
 AOSP_ROOT="$1"
 OUT_ROOT="$2"
 GEN="$3"
+PUBLIC_OUT_RESERVE_GB="${PUBLIC_OUT_RESERVE_GB:-48}"
 
 # Public build fabric only. This script MUST NOT consume private GIO source,
 # signing material, repository credentials, or any private payload.
@@ -25,8 +26,8 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
 
 sudo modprobe nbd nbds_max=128 max_part=0
 sudo modprobe dm_mod
-sudo mkdir -p /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work "$AOSP_ROOT" "$OUT_ROOT"
-sudo chown -R "$USER:$USER" /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work "$AOSP_ROOT" "$OUT_ROOT"
+sudo mkdir -p /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs "$AOSP_ROOT" "$OUT_ROOT"
+sudo chown -R "$USER:$USER" /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs "$AOSP_ROOT" "$OUT_ROOT"
 
 repos=(
   giovannifidel-collab/razzo-shard-0151
@@ -49,6 +50,10 @@ repos=(
 
 nbd=0
 lowers=()
+localized=0
+remote=0
+reserve_bytes=$((PUBLIC_OUT_RESERVE_GB * 1024 * 1024 * 1024))
+
 for i in $(seq 0 15); do
   id=$(printf '%02d' "$i")
   repo="${repos[$i]}"
@@ -64,50 +69,95 @@ for i in $(seq 0 15); do
     curl -fsSL --retry 5 --retry-all-errors "$url" -o "$meta/$asset"
   done
 
-  devs=()
-  starts=0
-  table="$meta/dm.table"
-  : > "$table"
+  pack_bytes=0
   while read -r expected recorded; do
     name="${recorded##*/}"
-    test -n "$name"
-    digest="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
-    test "$digest" = "sha256:$expected" || { echo "DIGEST_MISMATCH $repo $name" >&2; exit 1; }
-    url="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
     size="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' <<<"$json")"
     test "$size" -gt 0
-    test $((size % 512)) -eq 0 || { echo "UNALIGNED_CHUNK $name $size" >&2; exit 1; }
-
-    sock="/tmp/gio-public-nbd-${nbd}.sock"
-    log="/tmp/gio-public-nbd-${nbd}.log"
-    rm -f "$sock" "$log"
-    nice -n 12 nbdkit -r -U "$sock" --filter=retry curl url="$url" retries=8 connections=1 >"$log" 2>&1 &
-    for waitn in $(seq 1 30); do test -S "$sock" && break; sleep 1; done
-    test -S "$sock" || { cat "$log"; exit 1; }
-    sudo nbd-client -unix "$sock" "/dev/nbd${nbd}" >/dev/null
-    actual_size="$(sudo blockdev --getsize64 "/dev/nbd${nbd}")"
-    test "$actual_size" = "$size" || { echo "NBD_SIZE_MISMATCH $name $actual_size $size" >&2; exit 1; }
-    sectors=$((size / 512))
-    printf '%s %s linear /dev/nbd%s 0\n' "$starts" "$sectors" "$nbd" >> "$table"
-    starts=$((starts + sectors))
-    devs+=("/dev/nbd${nbd}")
-    nbd=$((nbd + 1))
+    pack_bytes=$((pack_bytes + size))
   done < "$meta/gio-a14-source-pack-${i}.chunks.sha256"
 
-  test "${#devs[@]}" -gt 0
-  if test "${#devs[@]}" -eq 1; then
-    packdev="${devs[0]}"
-  else
-    sudo dmsetup create "gio-public-pack-${id}" < "$table"
-    packdev="/dev/mapper/gio-public-pack-${id}"
+  avail_bytes="$(df --output=avail -B1 /mnt | tail -n1 | tr -d ' ')"
+  localize=0
+  if [ "${LOCALIZE_PUBLIC_PACKS:-1}" = "1" ] && [ $((avail_bytes - pack_bytes)) -ge "$reserve_bytes" ]; then
+    localize=1
   fi
 
   mp="/mnt/gio-lower/${id}"
   mkdir -p "$mp"
-  sudo mount -t squashfs -o ro "$packdev" "$mp"
+
+  if [ "$localize" -eq 1 ]; then
+    packfile="/mnt/gio-local-packs/gio-a14-source-pack-${i}.sqfs"
+    : > "$packfile"
+    chunk_index=0
+    while read -r expected recorded; do
+      name="${recorded##*/}"
+      digest="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
+      test "$digest" = "sha256:$expected" || { echo "DIGEST_MISMATCH $repo $name" >&2; exit 1; }
+      url="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
+      size="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' <<<"$json")"
+      test "$size" -gt 0
+      chunk="/mnt/gio-local-packs/.pack-${id}-chunk-${chunk_index}"
+      curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "$url" -o "$chunk"
+      actual="$(sha256sum "$chunk" | awk '{print $1}')"
+      test "$actual" = "$expected" || { echo "LOCAL_CHUNK_SHA_MISMATCH $repo $name" >&2; exit 1; }
+      cat "$chunk" >> "$packfile"
+      rm -f "$chunk"
+      chunk_index=$((chunk_index + 1))
+    done < "$meta/gio-a14-source-pack-${i}.chunks.sha256"
+    expected_sqfs="$(awk 'NR==1 {print $1}' "$meta/gio-a14-source-pack-${i}.sqfs.sha256")"
+    actual_sqfs="$(sha256sum "$packfile" | awk '{print $1}')"
+    test "$actual_sqfs" = "$expected_sqfs" || { echo "LOCAL_SQFS_SHA_MISMATCH pack${id}" >&2; exit 1; }
+    sudo mount -t squashfs -o loop,ro "$packfile" "$mp"
+    localized=$((localized + 1))
+    echo "LOCAL_PACK_${id}=MOUNTED bytes=${pack_bytes}"
+  else
+    devs=()
+    starts=0
+    table="$meta/dm.table"
+    : > "$table"
+    while read -r expected recorded; do
+      name="${recorded##*/}"
+      test -n "$name"
+      digest="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
+      test "$digest" = "sha256:$expected" || { echo "DIGEST_MISMATCH $repo $name" >&2; exit 1; }
+      url="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
+      size="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' <<<"$json")"
+      test "$size" -gt 0
+      test $((size % 512)) -eq 0 || { echo "UNALIGNED_CHUNK $name $size" >&2; exit 1; }
+
+      sock="/tmp/gio-public-nbd-${nbd}.sock"
+      log="/tmp/gio-public-nbd-${nbd}.log"
+      rm -f "$sock" "$log"
+      nice -n 12 nbdkit -r -U "$sock" --filter=retry curl url="$url" retries=8 connections=1 >"$log" 2>&1 &
+      for waitn in $(seq 1 30); do test -S "$sock" && break; sleep 1; done
+      test -S "$sock" || { cat "$log"; exit 1; }
+      sudo nbd-client -unix "$sock" "/dev/nbd${nbd}" >/dev/null
+      actual_size="$(sudo blockdev --getsize64 "/dev/nbd${nbd}")"
+      test "$actual_size" = "$size" || { echo "NBD_SIZE_MISMATCH $name $actual_size $size" >&2; exit 1; }
+      sectors=$((size / 512))
+      printf '%s %s linear /dev/nbd%s 0\n' "$starts" "$sectors" "$nbd" >> "$table"
+      starts=$((starts + sectors))
+      devs+=("/dev/nbd${nbd}")
+      nbd=$((nbd + 1))
+    done < "$meta/gio-a14-source-pack-${i}.chunks.sha256"
+
+    test "${#devs[@]}" -gt 0
+    if test "${#devs[@]}" -eq 1; then
+      packdev="${devs[0]}"
+    else
+      sudo dmsetup create "gio-public-pack-${id}" < "$table"
+      packdev="/dev/mapper/gio-public-pack-${id}"
+    fi
+    sudo mount -t squashfs -o ro "$packdev" "$mp"
+    remote=$((remote + 1))
+    echo "REMOTE_PACK_${id}=MOUNTED bytes=${pack_bytes}"
+  fi
   lowers=("$mp" "${lowers[@]}")
-  echo "REMOTE_PACK_${id}=MOUNTED"
 done
+
+echo "SOURCE_PACK_LOCALIZED=${localized}"
+echo "SOURCE_PACK_REMOTE=${remote}"
 
 python3 - <<'PY'
 import hashlib, json, pathlib
@@ -144,15 +194,11 @@ test -f "$AOSP_ROOT/device/xiaomi/lavender/lineage_lavender.mk"
 test -d "$AOSP_ROOT/frameworks/base"
 
 # Public build must remain clean of the private payload and signing material.
-# The pack manifests above are the fail-closed proof for all 1,435 projects.
-# Do not recursively traverse the remote NBD source tree here: that consumed
-# ~2 hours on run #4 and provides no stronger evidence than the signed pack
-# metadata plus the explicit absence of the only private payload root.
 test ! -e "$AOSP_ROOT/vendor/gioos"
 
 rm -rf "$AOSP_ROOT/out"
 ln -s "$OUT_ROOT" "$AOSP_ROOT/out"
 
-echo "PUBLIC_DISKLESS_SETUP=PASS"
+echo "PUBLIC_SOURCE_SETUP=PASS"
 df -hT / /mnt
 free -h
