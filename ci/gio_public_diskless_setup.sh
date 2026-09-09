@@ -18,18 +18,10 @@ sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup 
 sudo docker image prune -af >/dev/null 2>&1 || true
 sudo rm -rf /var/lib/apt/lists/* || true
 
-# GitHub's Ubuntu hosted image runs under hosted-compute-agent.service. Package
-# installation can make needrestart/systemd consider that service stale. A
-# restarted agent tears the ephemeral runner down and Soong then exits 143.
-# Keep the currently-running agent alive but make it impossible for package
-# maintainer scripts/needrestart to restart it during this build. The runtime
-# mask vanishes with the ephemeral VM and does not stop the running service.
 if systemctl list-unit-files 2>/dev/null | grep -q '^hosted-compute-agent\.service'; then
   sudo systemctl mask --runtime hosted-compute-agent.service >/dev/null 2>&1 || true
 fi
 
-# Also block daemon starts/restarts requested by Debian maintainer scripts.
-# This host is disposable; build tools do not require background daemons.
 POLICY_RC_CREATED=0
 if [ ! -e /usr/sbin/policy-rc.d ]; then
   printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
@@ -38,9 +30,6 @@ if [ ! -e /usr/sbin/policy-rc.d ]; then
 fi
 
 sudo apt-get update -qq
-# Install only genuinely missing build dependencies. --no-upgrade prevents
-# explicit upgrades; dependencies may still need package transactions, hence
-# the compute-agent protection above is deliberately independent of apt.
 packages=(
   bc bison build-essential ccache curl dmsetup flex g++-multilib gcc-multilib git git-lfs gnupg gperf
   imagemagick jq lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev
@@ -56,9 +45,6 @@ if [ "${#missing[@]}" -gt 0 ]; then
     apt-get install -y -qq --no-install-recommends --no-upgrade "${missing[@]}"
 fi
 
-# Remove only the policy file we created. Keep the runtime compute-agent mask
-# for the full lifetime of this ephemeral runner so no delayed restart can
-# terminate an active Soong process.
 if [ "$POLICY_RC_CREATED" -eq 1 ]; then
   sudo rm -f /usr/sbin/policy-rc.d
 fi
@@ -89,6 +75,33 @@ repos=(
   giovannifidel-collab/razzo-shard-0290
 )
 
+# Release assets are read through the API endpoint with the ephemeral public
+# workflow token. This avoids anonymous browser_download_url throttling/403s.
+api_headers=(-H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'User-Agent: gio-os-public-fabric')
+asset_headers=(-H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' -H 'User-Agent: gio-os-public-fabric')
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+  api_headers+=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )
+  asset_headers+=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )
+fi
+
+download_asset() {
+  local api_url="$1" out="$2" expected_digest="${3:-}"
+  local tmp="${out}.part"
+  rm -f "$tmp"
+  curl -fL --retry 8 --retry-all-errors --connect-timeout 20 \
+    "${asset_headers[@]}" "$api_url" -o "$tmp"
+  if [ -n "$expected_digest" ] && [ "$expected_digest" != "null" ]; then
+    local actual
+    actual="$(sha256sum "$tmp" | awk '{print $1}')"
+    test "$expected_digest" = "sha256:$actual" || {
+      echo "ASSET_SHA_MISMATCH $(basename "$out")" >&2
+      rm -f "$tmp"
+      return 1
+    }
+  fi
+  mv "$tmp" "$out"
+}
+
 nbd=0
 lowers=()
 localized=0
@@ -100,14 +113,15 @@ for i in $(seq 0 15); do
   repo="${repos[$i]}"
   tag="gio-a14-lavender-srcpack-${GEN}-pack${id}"
   api="https://api.github.com/repos/${repo}/releases/tags/${tag}"
-  json="$(curl -fsSL --retry 5 --retry-all-errors "$api")"
+  json="$(curl -fsSL --retry 8 --retry-all-errors --connect-timeout 20 "${api_headers[@]}" "$api")"
   meta="/mnt/gio-meta/${id}"
   mkdir -p "$meta"
 
   for asset in "pack-${i}-projects.json" "gio-a14-source-pack-${i}.chunks.sha256" "gio-a14-source-pack-${i}.sqfs.sha256"; do
-    url="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
-    test -n "$url" -a "$url" != null
-    curl -fsSL --retry 5 --retry-all-errors "$url" -o "$meta/$asset"
+    asset_api="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | .url' <<<"$json")"
+    digest="$(jq -r --arg n "$asset" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
+    test -n "$asset_api" -a "$asset_api" != null
+    download_asset "$asset_api" "$meta/$asset" "$digest"
   done
 
   pack_bytes=0
@@ -135,11 +149,11 @@ for i in $(seq 0 15); do
       name="${recorded##*/}"
       digest="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
       test "$digest" = "sha256:$expected" || { echo "DIGEST_MISMATCH $repo $name" >&2; exit 1; }
-      url="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
+      asset_api="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .url' <<<"$json")"
       size="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' <<<"$json")"
       test "$size" -gt 0
       chunk="/mnt/gio-local-packs/.pack-${id}-chunk-${chunk_index}"
-      curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "$url" -o "$chunk"
+      download_asset "$asset_api" "$chunk" "$digest"
       actual="$(sha256sum "$chunk" | awk '{print $1}')"
       test "$actual" = "$expected" || { echo "LOCAL_CHUNK_SHA_MISMATCH $repo $name" >&2; exit 1; }
       cat "$chunk" >> "$packfile"
@@ -162,7 +176,7 @@ for i in $(seq 0 15); do
       test -n "$name"
       digest="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | (.digest // "")' <<<"$json")"
       test "$digest" = "sha256:$expected" || { echo "DIGEST_MISMATCH $repo $name" >&2; exit 1; }
-      url="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .browser_download_url' <<<"$json")"
+      asset_api="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .url' <<<"$json")"
       size="$(jq -r --arg n "$name" '.assets[] | select(.name==$n) | .size' <<<"$json")"
       test "$size" -gt 0
       test $((size % 512)) -eq 0 || { echo "UNALIGNED_CHUNK $name $size" >&2; exit 1; }
@@ -170,12 +184,19 @@ for i in $(seq 0 15); do
       sock="/tmp/gio-public-nbd-${nbd}.sock"
       log="/tmp/gio-public-nbd-${nbd}.log"
       rm -f "$sock" "$log"
-      nice -n 12 nbdkit -r -U "$sock" --filter=retry curl url="$url" retries=8 connections=1 >"$log" 2>&1 &
+      nbd_args=(-r -U "$sock" --filter=retry curl url="$asset_api" retries=8 connections=1 \
+        header='Accept: application/octet-stream' \
+        header='X-GitHub-Api-Version: 2022-11-28' \
+        header='User-Agent: gio-os-public-fabric')
+      if [ -n "${GITHUB_TOKEN:-}" ]; then
+        nbd_args+=( header="Authorization: Bearer ${GITHUB_TOKEN}" )
+      fi
+      nice -n 12 nbdkit "${nbd_args[@]}" >"$log" 2>&1 &
       for waitn in $(seq 1 30); do test -S "$sock" && break; sleep 1; done
       test -S "$sock" || { cat "$log"; exit 1; }
       sudo nbd-client -unix "$sock" "/dev/nbd${nbd}" >/dev/null
       actual_size="$(sudo blockdev --getsize64 "/dev/nbd${nbd}")"
-      test "$actual_size" = "$size" || { echo "NBD_SIZE_MISMATCH $name $actual_size $size" >&2; exit 1; }
+      test "$actual_size" = "$size" || { echo "NBD_SIZE_MISMATCH $name $actual_size $size" >&2; cat "$log"; exit 1; }
       sectors=$((size / 512))
       printf '%s %s linear /dev/nbd%s 0\n' "$starts" "$sectors" "$nbd" >> "$table"
       starts=$((starts + sectors))
@@ -233,8 +254,6 @@ sudo mount -t overlay overlay -o "lowerdir=${lowerdir},upperdir=/mnt/gio-upper,w
 test -f "$AOSP_ROOT/build/envsetup.sh"
 test -f "$AOSP_ROOT/device/xiaomi/lavender/lineage_lavender.mk"
 test -d "$AOSP_ROOT/frameworks/base"
-
-# Public build must remain clean of the private payload and signing material.
 test ! -e "$AOSP_ROOT/vendor/gioos"
 
 rm -rf "$AOSP_ROOT/out"
