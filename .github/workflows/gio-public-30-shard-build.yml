@@ -94,9 +94,6 @@ jobs:
           - '28'
           - '29'
     env:
-      # Warmers use the verified source-pack assets on demand rather than
-      # downloading every multi-gigabyte pack onto every hosted runner.  Keep
-      # only one warmer active while diagnosing the repeated hosted shutdowns.
       LOCALIZE_PUBLIC_PACKS: '0'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
@@ -110,6 +107,8 @@ jobs:
 
       - name: Mount verified 16-pack Android source fabric
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
@@ -182,6 +181,8 @@ jobs:
 
       - name: Mount verified 16-pack Android source fabric
         shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
