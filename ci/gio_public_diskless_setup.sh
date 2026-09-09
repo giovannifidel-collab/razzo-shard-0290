@@ -18,11 +18,24 @@ sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup 
 sudo docker image prune -af >/dev/null 2>&1 || true
 sudo rm -rf /var/lib/apt/lists/* || true
 sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-  bc bison build-essential ccache curl dmsetup flex g++-multilib gcc-multilib git git-lfs gnupg gperf \
-  imagemagick jq lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev \
-  libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop nbd-client nbdkit openjdk-17-jdk \
+# Do not upgrade packages already present on GitHub-hosted images. Previous runs
+# upgraded runner-adjacent system packages and needrestart flagged the hosted
+# compute agent while Soong later received SIGTERM/143. Install only what is
+# missing and keep service restarts disabled for this ephemeral build host.
+packages=(
+  bc bison build-essential ccache curl dmsetup flex g++-multilib gcc-multilib git git-lfs gnupg gperf
+  imagemagick jq lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev
+  libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop nbd-client nbdkit openjdk-17-jdk
   pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python3 python-is-python3
+)
+missing=()
+for pkg in "${packages[@]}"; do
+  dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed' || missing+=("$pkg")
+done
+if [ "${#missing[@]}" -gt 0 ]; then
+  sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
+    apt-get install -y -qq --no-install-recommends --no-upgrade "${missing[@]}"
+fi
 
 sudo modprobe nbd nbds_max=128 max_part=0
 sudo modprobe dm_mod
