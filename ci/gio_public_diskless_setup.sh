@@ -17,11 +17,30 @@ sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup 
   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/Python || true
 sudo docker image prune -af >/dev/null 2>&1 || true
 sudo rm -rf /var/lib/apt/lists/* || true
+
+# GitHub's Ubuntu hosted image runs under hosted-compute-agent.service. Package
+# installation can make needrestart/systemd consider that service stale. A
+# restarted agent tears the ephemeral runner down and Soong then exits 143.
+# Keep the currently-running agent alive but make it impossible for package
+# maintainer scripts/needrestart to restart it during this build. The runtime
+# mask vanishes with the ephemeral VM and does not stop the running service.
+if systemctl list-unit-files 2>/dev/null | grep -q '^hosted-compute-agent\.service'; then
+  sudo systemctl mask --runtime hosted-compute-agent.service >/dev/null 2>&1 || true
+fi
+
+# Also block daemon starts/restarts requested by Debian maintainer scripts.
+# This host is disposable; build tools do not require background daemons.
+POLICY_RC_CREATED=0
+if [ ! -e /usr/sbin/policy-rc.d ]; then
+  printf '#!/bin/sh\nexit 101\n' | sudo tee /usr/sbin/policy-rc.d >/dev/null
+  sudo chmod 0755 /usr/sbin/policy-rc.d
+  POLICY_RC_CREATED=1
+fi
+
 sudo apt-get update -qq
-# Do not upgrade packages already present on GitHub-hosted images. Previous runs
-# upgraded runner-adjacent system packages and needrestart flagged the hosted
-# compute agent while Soong later received SIGTERM/143. Install only what is
-# missing and keep service restarts disabled for this ephemeral build host.
+# Install only genuinely missing build dependencies. --no-upgrade prevents
+# explicit upgrades; dependencies may still need package transactions, hence
+# the compute-agent protection above is deliberately independent of apt.
 packages=(
   bc bison build-essential ccache curl dmsetup flex g++-multilib gcc-multilib git git-lfs gnupg gperf
   imagemagick jq lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev
@@ -36,6 +55,15 @@ if [ "${#missing[@]}" -gt 0 ]; then
   sudo env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l \
     apt-get install -y -qq --no-install-recommends --no-upgrade "${missing[@]}"
 fi
+
+# Remove only the policy file we created. Keep the runtime compute-agent mask
+# for the full lifetime of this ephemeral runner so no delayed restart can
+# terminate an active Soong process.
+if [ "$POLICY_RC_CREATED" -eq 1 ]; then
+  sudo rm -f /usr/sbin/policy-rc.d
+fi
+
+echo "HOSTED_COMPUTE_AGENT_PROTECTED=PASS"
 
 sudo modprobe nbd nbds_max=128 max_part=0
 sudo modprobe dm_mod
