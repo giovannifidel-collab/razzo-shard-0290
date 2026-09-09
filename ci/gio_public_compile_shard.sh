@@ -74,7 +74,7 @@ for goal in "${goals[@]}"; do
   set +e
   timeout --signal=TERM --kill-after=30s 70m \
     nice -n 5 ionice -c2 -n5 \
-    build/soong/soong_ui.bash --make-mode "$goal" -j2 \
+    build/soong/soong_ui.bash --make-mode "$goal" -j1 \
     >> "$LOG" 2>&1
   rc=$?
   set -e
