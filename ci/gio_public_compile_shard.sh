@@ -67,23 +67,23 @@ ccache --set-config=compression=true >/dev/null || true
 ccache --set-config=compression_level=5 >/dev/null || true
 ccache --zero-stats >/dev/null || true
 
+# A compile shard is a cache warmer, not a complete independent Android build.
+# Running multiple broad goals causes duplicate graph/build work and makes the
+# hosted runner lifetime the bottleneck. Warm the shard's primary closure only,
+# bounded to 35 minutes; whatever compiler outputs were produced are sealed and
+# reused by the final local-source assembler.
 LOG="${CAPSULE%.tar}.log"
 : > "$LOG"
-for goal in "${goals[@]}"; do
-  echo "=== SHARD=$SHARD GOAL=$goal START=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
-  set +e
-  timeout --signal=TERM --kill-after=30s 70m \
-    nice -n 5 ionice -c2 -n5 \
-    build/soong/soong_ui.bash --make-mode "$goal" -j1 \
-    >> "$LOG" 2>&1
-  rc=$?
-  set -e
-  echo "=== SHARD=$SHARD GOAL=$goal RC=$rc END=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
-  size_bytes="$(du -sb "$CCACHE_DIR" 2>/dev/null | awk '{print $1}')"
-  if [ "${size_bytes:-0}" -ge 120000000 ]; then
-    break
-  fi
-done
+goal="${goals[0]}"
+echo "=== SHARD=$SHARD GOAL=$goal START=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
+set +e
+timeout --signal=TERM --kill-after=30s 35m \
+  nice -n 5 ionice -c2 -n5 \
+  build/soong/soong_ui.bash --make-mode "$goal" -j1 \
+  >> "$LOG" 2>&1
+rc=$?
+set -e
+echo "=== SHARD=$SHARD GOAL=$goal RC=$rc END=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
 
 ccache --cleanup >/dev/null || true
 ccache --show-stats | tee -a "$LOG" || true
@@ -92,7 +92,7 @@ find "$CCACHE_DIR" -type d -name tmp -prune -exec rm -rf {} + 2>/dev/null || tru
 
 tar -C "$CCACHE_DIR" -cf "$CAPSULE" .
 sha256sum "$CAPSULE" > "${CAPSULE}.sha256"
-printf 'schema=gio.os.public-compile-cache.v1\nshard=%s\ntarget=lavender\nandroid=14\nrelease=ap2a\nsourcepack_generation=v2-20260902\nprivate_gio_source_present=false\nsigning_keys_present=false\n' \
-  "$SHARD" > "${CAPSULE}.env"
+printf 'schema=gio.os.public-compile-cache.v1\nshard=%s\ntarget=lavender\nandroid=14\nrelease=ap2a\nsourcepack_generation=v2-20260902\nprimary_goal=%s\nprimary_goal_rc=%s\nprivate_gio_source_present=false\nsigning_keys_present=false\n' \
+  "$SHARD" "$goal" "$rc" > "${CAPSULE}.env"
 
 echo "PUBLIC_COMPILE_SHARD_${SHARD}=READY"
