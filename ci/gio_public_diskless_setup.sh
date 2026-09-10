@@ -30,11 +30,18 @@ fi
 
 sudo apt-get update -qq
 packages=(
-  bc bison build-essential ccache curl dmsetup flex g++-multilib gcc-multilib git git-lfs gnupg gperf
+  bc bison build-essential ccache curl flex g++-multilib gcc-multilib git git-lfs gnupg gperf
   imagemagick jq lib32readline-dev lib32z1-dev libelf-dev liblz4-tool libncurses-dev
-  libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop nbd-client nbdkit openjdk-17-jdk
+  libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop openjdk-17-jdk
   pngcrush rsync schedtool squashfs-tools xsltproc zip unzip zlib1g-dev python3 python-is-python3
 )
+# nbd-client/nbdkit/dmsetup are only required for remote/on-demand packs.
+# Installing nbd-client on GitHub's hosted Ubuntu image triggers update-initramfs;
+# the localized path must not touch that stack because it can destabilize the
+# hosted compute agent several minutes later while Soong is running.
+if [ "${LOCALIZE_PUBLIC_PACKS:-1}" != "1" ]; then
+  packages+=(dmsetup nbd-client nbdkit)
+fi
 missing=()
 for pkg in "${packages[@]}"; do
   dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed' || missing+=("$pkg")
@@ -50,8 +57,10 @@ fi
 
 echo "HOSTED_COMPUTE_AGENT_UNTOUCHED=PASS"
 
-sudo modprobe nbd nbds_max=128 max_part=0
-sudo modprobe dm_mod
+if [ "${LOCALIZE_PUBLIC_PACKS:-1}" != "1" ]; then
+  sudo modprobe nbd nbds_max=128 max_part=0
+  sudo modprobe dm_mod
+fi
 sudo mkdir -p /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs "$AOSP_ROOT" "$OUT_ROOT"
 sudo chown -R "$USER:$USER" /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs "$AOSP_ROOT" "$OUT_ROOT"
 
