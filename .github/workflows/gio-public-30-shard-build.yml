@@ -94,7 +94,7 @@ jobs:
           - '28'
           - '29'
     env:
-      LOCALIZE_PUBLIC_PACKS: '1'
+      LOCALIZE_PUBLIC_PACKS: '0'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
       SHARD: ${{ matrix.shard }}
