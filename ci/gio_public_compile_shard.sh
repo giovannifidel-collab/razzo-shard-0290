@@ -45,6 +45,17 @@ case "$SHARD" in
   *) echo "invalid shard id: $SHARD" >&2; exit 2 ;;
 esac
 
+# Never leave GitHub's hosted compute control service masked while a heavy Soong
+# process is running. Earlier setup revisions masked it around apt transactions;
+# two independent runners were then recycled with SIGTERM/143 about three
+# minutes into Soong despite ample RAM/disk and live heartbeats. Restoring the
+# service registration is infrastructure-only and does not alter build inputs.
+if systemctl list-unit-files 2>/dev/null | grep -q '^hosted-compute-agent\.service'; then
+  sudo systemctl unmask --runtime hosted-compute-agent.service >/dev/null 2>&1 || true
+fi
+
+echo "HOSTED_COMPUTE_AGENT_UNMASKED=PASS"
+
 cd "$AOSP_ROOT"
 set +u
 export USE_CCACHE=1
