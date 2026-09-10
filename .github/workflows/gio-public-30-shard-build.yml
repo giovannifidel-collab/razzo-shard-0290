@@ -94,7 +94,10 @@ jobs:
           - '28'
           - '29'
     env:
-      LOCALIZE_PUBLIC_PACKS: '0'
+      # Remote NBD source reads proved non-deterministic under long Soong scans
+      # (missing prebuilts/go stdlib files). With max-parallel=1 we can safely
+      # localize each warmer and retain the exact pinned public source fabric.
+      LOCALIZE_PUBLIC_PACKS: '1'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
       SHARD: ${{ matrix.shard }}
