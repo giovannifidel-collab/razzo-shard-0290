@@ -60,7 +60,7 @@ jobs:
     continue-on-error: true
     strategy:
       fail-fast: false
-      max-parallel: 3
+      max-parallel: 1
       matrix:
         shard:
           - '00'
@@ -94,11 +94,6 @@ jobs:
           - '28'
           - '29'
     env:
-      # Remote/NBD mount mode is valid for metadata inspection but sustained
-      # Soong reads can enter uninterruptible I/O and defeat the child timeout.
-      # Warmers therefore localize the verified packs before their 7-minute
-      # compile slice. Only three warmers run concurrently to bound bandwidth,
-      # disk and hosted-runner pressure. Product inputs and pins are unchanged.
       LOCALIZE_PUBLIC_PACKS: '1'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
