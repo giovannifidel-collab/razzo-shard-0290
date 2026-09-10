@@ -76,6 +76,20 @@ LOG="${CAPSULE%.tar}.log"
 : > "$LOG"
 goal="${goals[0]}"
 echo "=== SHARD=$SHARD GOAL=$goal START=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
+
+# Soong can legitimately emit no console output for several minutes because its
+# verbose stream is captured in the shard log. Keep the hosted job observably
+# alive without changing build inputs, parallelism or artifacts.
+(
+  while true; do
+    sleep 60
+    printf 'GIO_WARMER_HEARTBEAT shard=%s goal=%s time=%s\n' \
+      "$SHARD" "$goal" "$(date -u +%FT%TZ)"
+  done
+) &
+HB_PID=$!
+trap 'kill "$HB_PID" >/dev/null 2>&1 || true; wait "$HB_PID" >/dev/null 2>&1 || true' EXIT
+
 set +e
 timeout --signal=TERM --kill-after=30s 35m \
   nice -n 5 ionice -c2 -n5 \
@@ -83,6 +97,10 @@ timeout --signal=TERM --kill-after=30s 35m \
   >> "$LOG" 2>&1
 rc=$?
 set -e
+kill "$HB_PID" >/dev/null 2>&1 || true
+wait "$HB_PID" >/dev/null 2>&1 || true
+trap - EXIT
+
 echo "=== SHARD=$SHARD GOAL=$goal RC=$rc END=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
 
 ccache --cleanup >/dev/null || true
