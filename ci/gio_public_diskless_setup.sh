@@ -2,10 +2,12 @@
 set -euo pipefail
 
 # Compatibility wrapper for public cross-repository Release assets.
-# GITHUB_TOKEN is intentionally retained for release metadata API calls, but
-# must not be sent to binary asset endpoints owned by sibling public repos:
-# GitHub can reject that repo-scoped token with HTTP 403. The underlying
-# source-pack integrity remains enforced by the recorded asset digest/SHA256.
+# Metadata stays on the GitHub API with the ephemeral workflow token, but
+# binary reads use each asset's stable public browser_download_url. This is
+# important for remote/NBD range reads: sibling-repo API asset URLs can return
+# 403 with a repo-scoped token, while anonymously retrying a pre-resolved API
+# redirect can age into 500/403 failures. The stable public URL lets GitHub
+# issue a fresh release-asset redirect for each request/range read.
 ORIG="$GITHUB_WORKSPACE/ci/gio_public_diskless_setup_orig.sh"
 TMP="${RUNNER_TEMP:-/tmp}/gio_public_diskless_setup_inner.sh"
 cp "$ORIG" "$TMP"
@@ -25,6 +27,9 @@ new = '        : # public cross-repo NBD assets are fetched anonymously'
 if old not in s:
     raise SystemExit('nbd Authorization hook not found')
 s = s.replace(old, new, 1)
+# Binary asset fetches/mounts must use the stable public release URL rather
+# than the API asset endpoint. Release metadata itself still comes from API.
+s = s.replace("'.assets[] | select(.name==$n) | .url'", "'.assets[] | select(.name==$n) | .browser_download_url'")
 p.write_text(s)
 PY
 
