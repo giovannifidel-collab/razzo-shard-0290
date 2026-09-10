@@ -56,11 +56,11 @@ jobs:
     name: compile-shard-${{ matrix.shard }}
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 60
     continue-on-error: true
     strategy:
       fail-fast: false
-      max-parallel: 1
+      max-parallel: 6
       matrix:
         shard:
           - '00'
@@ -94,10 +94,10 @@ jobs:
           - '28'
           - '29'
     env:
-      # Remote NBD source reads proved non-deterministic under long Soong scans
-      # (missing prebuilts/go stdlib files). With max-parallel=1 we can safely
-      # localize each warmer and retain the exact pinned public source fabric.
-      LOCALIZE_PUBLIC_PACKS: '1'
+      # Warmers use the verified source-pack fabric on demand. They are bounded
+      # cache producers; the final assembler is the only stage that localizes
+      # all 16 packs for a deterministic full target-files build.
+      LOCALIZE_PUBLIC_PACKS: '0'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
       SHARD: ${{ matrix.shard }}
