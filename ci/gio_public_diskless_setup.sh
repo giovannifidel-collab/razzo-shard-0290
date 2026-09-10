@@ -13,14 +13,13 @@ PUBLIC_OUT_RESERVE_GB="${PUBLIC_OUT_RESERVE_GB:-48}"
 
 # Public build fabric only. This script MUST NOT consume private GIO source,
 # signing material, repository credentials, or any private payload.
+# Never modify, mask, stop, restart, or otherwise interfere with the
+# GitHub-hosted runner control/compute agent. Build preparation must remain
+# entirely inside the ordinary job environment.
 sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
   /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/go /opt/hostedtoolcache/Python || true
 sudo docker image prune -af >/dev/null 2>&1 || true
 sudo rm -rf /var/lib/apt/lists/* || true
-
-if systemctl list-unit-files 2>/dev/null | grep -q '^hosted-compute-agent\.service'; then
-  sudo systemctl mask --runtime hosted-compute-agent.service >/dev/null 2>&1 || true
-fi
 
 POLICY_RC_CREATED=0
 if [ ! -e /usr/sbin/policy-rc.d ]; then
@@ -49,7 +48,7 @@ if [ "$POLICY_RC_CREATED" -eq 1 ]; then
   sudo rm -f /usr/sbin/policy-rc.d
 fi
 
-echo "HOSTED_COMPUTE_AGENT_PROTECTED=PASS"
+echo "HOSTED_COMPUTE_AGENT_UNTOUCHED=PASS"
 
 sudo modprobe nbd nbds_max=128 max_part=0
 sudo modprobe dm_mod
