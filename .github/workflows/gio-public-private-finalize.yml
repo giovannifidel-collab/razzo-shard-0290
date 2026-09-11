@@ -6,13 +6,18 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      public_run_id:
+        description: 'Successful public fabric run ID'
+        required: true
+        type: string
       public_head_sha:
-        description: 'Successful 30-shard fabric head SHA'
+        description: 'Successful public fabric head SHA'
         required: true
         type: string
 
 permissions:
-  contents: write
+  contents: read
+  actions: read
 
 env:
   GIO_AUTHORITATIVE_SHA: 31103989996a664dff385896143dccd03072cdf6
@@ -37,31 +42,45 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve and verify successful public base release
+      - name: Resolve successful public fabric identity
         id: public
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
           EVENT_NAME: ${{ github.event_name }}
           AUTO_SHA: ${{ github.event.workflow_run.head_sha }}
+          AUTO_RUN_ID: ${{ github.event.workflow_run.id }}
           MANUAL_SHA: ${{ inputs.public_head_sha }}
+          MANUAL_RUN_ID: ${{ inputs.public_run_id }}
         run: |
           set -euo pipefail
           if [ "$EVENT_NAME" = workflow_run ]; then
             PUBLIC_SHA="$AUTO_SHA"
+            PUBLIC_RUN_ID="$AUTO_RUN_ID"
           else
             PUBLIC_SHA="$MANUAL_SHA"
+            PUBLIC_RUN_ID="$MANUAL_RUN_ID"
           fi
           test -n "$PUBLIC_SHA"
-          TAG="gio-a14-lavender-compilecache-v1-${PUBLIC_SHA:0:12}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          test -n "$PUBLIC_RUN_ID"
           echo "public_sha=$PUBLIC_SHA" >> "$GITHUB_OUTPUT"
-          rm -rf "$RUNNER_TEMP/public-proof"
-          mkdir -p "$RUNNER_TEMP/public-proof"
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'PROVENANCE.env' --pattern 'SHA256SUMS' \
-            --dir "$RUNNER_TEMP/public-proof"
+          echo "public_run_id=$PUBLIC_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "PUBLIC_FABRIC_IDENTITY=READY"
+
+      - name: Download verified public base
+        uses: actions/download-artifact@v4
+        with:
+          name: gio-public-base
+          path: ${{ runner.temp }}/public-proof
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.public.outputs.public_run_id }}
+
+      - name: Verify public base provenance
+        shell: bash
+        run: |
+          set -euo pipefail
           test -s "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          test -s "$RUNNER_TEMP/public-proof/SHA256SUMS"
           grep -Fx 'sourcepack_generation=v2-20260902' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
           grep -Fx 'target=lavender' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
           grep -Fx "device_sha=$DEVICE_SHA" "$RUNNER_TEMP/public-proof/PROVENANCE.env"
@@ -69,6 +88,9 @@ jobs:
           grep -Fx "vendor_sha=$VENDOR_SHA" "$RUNNER_TEMP/public-proof/PROVENANCE.env"
           grep -Fx 'private_gio_source_present=false' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
           grep -Fx 'signing_keys_present=false' "$RUNNER_TEMP/public-proof/PROVENANCE.env"
+          (cd "$RUNNER_TEMP/public-proof" && sha256sum -c SHA256SUMS)
+          unzip -t "$RUNNER_TEMP/public-proof/lavender-public-target_files.zip" >/dev/null
+          unzip -t "$RUNNER_TEMP/public-proof/otatools.zip" >/dev/null
           echo "PUBLIC_BASE_PROVENANCE=PASS"
 
       - name: Mount exact public Android source fabric
@@ -76,24 +98,27 @@ jobs:
         env:
           LOCALIZE_PUBLIC_PACKS: '1'
           PUBLIC_OUT_RESERVE_GB: '40'
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" \
-            "$AOSP_ROOT" "$OUT_ROOT" "$SOURCEPACK_GENERATION"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$SOURCEPACK_GENERATION"
+
+      - name: Download public compile caches
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccache-shard-*
+          path: ${{ runner.temp }}/gio-cache-download
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.public.outputs.public_run_id }}
 
       - name: Import verified public compile caches
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.public.outputs.tag }}
         run: |
           set -euo pipefail
-          rm -rf "$RUNNER_TEMP/gio-cache-download" "$CCACHE_DIR"
-          mkdir -p "$RUNNER_TEMP/gio-cache-download" "$CCACHE_DIR"
-          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'ccache-shard-*.tar' \
-            --pattern 'ccache-shard-*.tar.sha256' \
-            --dir "$RUNNER_TEMP/gio-cache-download"
+          rm -rf "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR"
           mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
           echo "FINALIZER_CACHE_CAPSULES=${#capsules[@]}"
           test "${#capsules[@]}" -ge 8
@@ -132,8 +157,7 @@ jobs:
           chmod 700 "$ASKPASS"
           export GIT_ASKPASS="$ASKPASS"
           export GIT_TERMINAL_PROMPT=0
-          git clone --filter=blob:none --no-checkout \
-            https://github.com/giovannifidel-collab/gio-OS.git "$PRIVATE"
+          git clone --filter=blob:none --no-checkout https://github.com/giovannifidel-collab/gio-OS.git "$PRIVATE"
           git -C "$PRIVATE" fetch --depth=1 origin "$GIO_AUTHORITATIVE_SHA"
           git -C "$PRIVATE" checkout --detach "$GIO_AUTHORITATIVE_SHA"
           test "$(git -C "$PRIVATE" rev-parse HEAD)" = "$GIO_AUTHORITATIVE_SHA"
@@ -177,8 +201,7 @@ jobs:
           for name in "${pairs[@]}"; do
             pem="$KEY_TMP/${name}.pem"
             openssl genrsa -out "$pem" 3072 >/dev/null 2>&1
-            openssl req -new -x509 -key "$pem" -out "$sec/${name}.x509.pem" -days 3650 \
-              -subj "/C=IT/O=GIO OS/OU=RC Signing/CN=GIO OS ${name} RC"
+            openssl req -new -x509 -key "$pem" -out "$sec/${name}.x509.pem" -days 3650 -subj "/C=IT/O=GIO OS/OU=RC Signing/CN=GIO OS ${name} RC"
             openssl pkcs8 -in "$pem" -topk8 -outform DER -out "$sec/${name}.pk8" -nocrypt
           done
           echo "EPHEMERAL_RC_KEYS=READY"
@@ -207,10 +230,7 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/final" "$GITHUB_WORKSPACE/diagnostics"
           : > "$RUNNER_TEMP/gio-final-private.log"
           set +e
-          timeout --signal=TERM --kill-after=30s 315m \
-            nice -n 5 ionice -c2 -n5 \
-            bash -c 'set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug >/dev/null; mka bacon -j2' \
-            > >(tee -a "$RUNNER_TEMP/gio-final-private.log") 2>&1
+          timeout --signal=TERM --kill-after=30s 315m nice -n 5 ionice -c2 -n5 bash -c 'set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug >/dev/null; mka bacon -j2' > >(tee -a "$RUNNER_TEMP/gio-final-private.log") 2>&1
           rc=$?
           set -e
           tail -n 15000 "$RUNNER_TEMP/gio-final-private.log" > "$GITHUB_WORKSPACE/diagnostics/private-build-tail.log" || true
@@ -245,8 +265,7 @@ jobs:
             'channel=rc' \
             'hardware_validated=false' \
             'private_source_ephemeral=true' \
-            'signing_keys_published=false' \
-            > "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
+            'signing_keys_published=false' > "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
           test "$(cat "$GITHUB_WORKSPACE/final/.gioos-source-sha")" = "$GIO_AUTHORITATIVE_SHA"
           grep -Fx "source_sha=$GIO_AUTHORITATIVE_SHA" "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
           grep -Fx 'sourcepack_generation=v2-20260902' "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
@@ -254,39 +273,23 @@ jobs:
           grep -Fx 'hardware_validated=false' "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env"
           echo "FINAL_GIO_OS_ZIP=VERIFIED"
 
-      - name: Publish verified GIO OS RC
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG=gio-os-1.0.0-rc0-lavender
-          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --prerelease \
-              --title 'GIO OS 1.0.0-rc0 Lavender' \
-              --notes 'Hardware-unvalidated RC. Private source and signing keys are not published.'
-          fi
-          gh release upload "$TAG" \
-            "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip" \
-            "$GITHUB_WORKSPACE/final/gio-OS-1.0.0-rc0-lavender.zip.sha256" \
-            "$GITHUB_WORKSPACE/final/.gioos-source-sha" \
-            "$GITHUB_WORKSPACE/final/BUILD_PROVENANCE.env" \
-            --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Upload verified GIO OS RC
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-OS-1.0.0-rc0-lavender
+          path: final/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
 
-      - name: Publish diagnostics on failure
+      - name: Upload diagnostics on failure
         if: failure()
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set +e
-          TAG="${{ steps.public.outputs.tag }}"
-          [ -n "$TAG" ] || exit 0
-          for f in "$GITHUB_WORKSPACE"/diagnostics/*; do
-            [ -f "$f" ] || continue
-            gh release upload "$TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber || true
-          done
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-private-finalizer-diagnostics
+          path: diagnostics/
+          if-no-files-found: ignore
+          retention-days: 2
 
       - name: Destroy private source and signing material
         if: always()
