@@ -15,7 +15,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: gio-public-30-shard-compile-v4
+  group: gio-public-30-shard-compile-v5
   cancel-in-progress: true
 
 env:
@@ -125,7 +125,7 @@ jobs:
           for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
           sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
 
-  assemble-public-base:
+  assemble-target-files:
     name: assemble-public-target-files-from-30-shard-cache
     needs: [prepare, warm-cache]
     if: ${{ always() && needs.prepare.result == 'success' }}
@@ -186,7 +186,7 @@ jobs:
           ccache --show-stats || true
           du -sh "$CCACHE_DIR" || true
 
-      - name: Build public target-files and otatools with merged cache
+      - name: Build public target-files with merged cache
         shell: bash
         run: |
           set -eo pipefail
@@ -207,38 +207,244 @@ jobs:
           export BUILD_USERNAME="$BUILD_USERNAME"
           export BUILD_HOSTNAME="$BUILD_HOSTNAME"
           set -u
-          mkdir -p "$GITHUB_WORKSPACE/diagnostics" "$GITHUB_WORKSPACE/gio-public-base"
-          : > "$RUNNER_TEMP/gio-final-build.log"
-          : > "$RUNNER_TEMP/gio-final-resources.log"
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics-target" "$GITHUB_WORKSPACE/target-files-artifact"
+          : > "$RUNNER_TEMP/gio-target-build.log"
+          : > "$RUNNER_TEMP/gio-target-resources.log"
           (
             while true; do
-              printf '\n=== FINAL_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
+              printf '\n=== TARGET_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
               df -hT / /mnt || true
               free -h || true
               ccache --show-stats || true
               sleep 45
             done
-          ) > >(tee -a "$RUNNER_TEMP/gio-final-resources.log") 2>&1 &
+          ) > >(tee -a "$RUNNER_TEMP/gio-target-resources.log") 2>&1 &
           MON_PID=$!
           set +e
-          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1 > >(tee -a "$RUNNER_TEMP/gio-final-build.log") 2>&1
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j1 > >(tee -a "$RUNNER_TEMP/gio-target-build.log") 2>&1
           BUILD_RC=$?
           set -e
           kill "$MON_PID" >/dev/null 2>&1 || true
           wait "$MON_PID" >/dev/null 2>&1 || true
-          cp "$RUNNER_TEMP/gio-final-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
-          tail -n 15000 "$RUNNER_TEMP/gio-final-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
-          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j1\nsourcepack_generation=%s\n' "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics/BUILD.env"
+          cp "$RUNNER_TEMP/gio-target-resources.log" "$GITHUB_WORKSPACE/diagnostics-target/resource.log" || true
+          tail -n 15000 "$RUNNER_TEMP/gio-target-build.log" > "$GITHUB_WORKSPACE/diagnostics-target/build-tail.log" || true
+          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-split-target-j1\nsourcepack_generation=%s\n' "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics-target/BUILD.env"
           test "$BUILD_RC" -eq 0
 
-      - name: Collect and verify public base
+      - name: Collect and verify target-files
         shell: bash
         run: |
           set -euo pipefail
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
-          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
           test -n "$target_files" -a -f "$target_files"
+          unzip -t "$target_files" >/dev/null
+          cp "$target_files" "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip"
+          sha256sum "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip" > "$GITHUB_WORKSPACE/target-files-artifact/TARGET_FILES_SHA256"
+          echo "PUBLIC_TARGET_FILES=READY"
+
+      - name: Upload verified target-files
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-public-target-files
+          path: target-files-artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Upload target-files diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-public-target-files-diagnostics
+          path: diagnostics-target/
+          if-no-files-found: ignore
+          retention-days: 2
+
+      - name: Cleanup target-files mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
+
+  assemble-otatools:
+    name: assemble-public-otatools-from-30-shard-cache
+    needs: [prepare, warm-cache]
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      LOCALIZE_PUBLIC_PACKS: '1'
+      PUBLIC_OUT_RESERVE_GB: '40'
+      CCACHE_DIR: /tmp/gio-final-ccache
+      CCACHE_MAXSIZE: 4G
+      USE_CCACHE: '1'
+    steps:
+      - name: Checkout public orchestration only
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount verified 16-pack Android source fabric
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+
+      - name: Apply deterministic generic GIO private-core hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Download available compile-cache capsules
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccache-shard-*
+          path: ${{ runner.temp }}/gio-cache-download
+          merge-multiple: true
+
+      - name: Import and verify available compile-cache capsules
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$CCACHE_DIR"
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "PUBLIC_CACHE_CAPSULE_COUNT=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 8
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+          du -sh "$CCACHE_DIR" || true
+
+      - name: Build public otatools with merged cache
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          set +u
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          export BUILD_NUMBER="$BUILD_NUMBER"
+          export BUILD_USERNAME="$BUILD_USERNAME"
+          export BUILD_HOSTNAME="$BUILD_HOSTNAME"
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/diagnostics-otatools" "$GITHUB_WORKSPACE/otatools-artifact"
+          : > "$RUNNER_TEMP/gio-otatools-build.log"
+          : > "$RUNNER_TEMP/gio-otatools-resources.log"
+          (
+            while true; do
+              printf '\n=== OTATOOLS_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
+              df -hT / /mnt || true
+              free -h || true
+              ccache --show-stats || true
+              sleep 45
+            done
+          ) > >(tee -a "$RUNNER_TEMP/gio-otatools-resources.log") 2>&1 &
+          MON_PID=$!
+          set +e
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode otatools-package -j1 > >(tee -a "$RUNNER_TEMP/gio-otatools-build.log") 2>&1
+          BUILD_RC=$?
+          set -e
+          kill "$MON_PID" >/dev/null 2>&1 || true
+          wait "$MON_PID" >/dev/null 2>&1 || true
+          cp "$RUNNER_TEMP/gio-otatools-resources.log" "$GITHUB_WORKSPACE/diagnostics-otatools/resource.log" || true
+          tail -n 15000 "$RUNNER_TEMP/gio-otatools-build.log" > "$GITHUB_WORKSPACE/diagnostics-otatools/build-tail.log" || true
+          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-split-otatools-j1\nsourcepack_generation=%s\n' "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics-otatools/BUILD.env"
+          test "$BUILD_RC" -eq 0
+
+      - name: Collect and verify otatools
+        shell: bash
+        run: |
+          set -euo pipefail
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
           test -n "$otatools" -a -f "$otatools"
+          unzip -t "$otatools" >/dev/null
+          cp "$otatools" "$GITHUB_WORKSPACE/otatools-artifact/otatools.zip"
+          sha256sum "$GITHUB_WORKSPACE/otatools-artifact/otatools.zip" > "$GITHUB_WORKSPACE/otatools-artifact/OTATOOLS_SHA256"
+          echo "PUBLIC_OTATOOLS=READY"
+
+      - name: Upload verified otatools
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-public-otatools
+          path: otatools-artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Upload otatools diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-public-otatools-diagnostics
+          path: diagnostics-otatools/
+          if-no-files-found: ignore
+          retention-days: 2
+
+      - name: Cleanup otatools mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
+
+  collect-public-base:
+    name: collect-and-verify-public-base
+    needs: [assemble-target-files, assemble-otatools]
+    if: ${{ needs.assemble-target-files.result == 'success' && needs.assemble-otatools.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Download target-files
+        uses: actions/download-artifact@v4
+        with:
+          name: gio-public-target-files
+          path: ${{ runner.temp }}/target-files
+
+      - name: Download otatools
+        uses: actions/download-artifact@v4
+        with:
+          name: gio-public-otatools
+          path: ${{ runner.temp }}/otatools
+
+      - name: Verify and seal public base provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/gio-public-base"
+          target_files="$RUNNER_TEMP/target-files/lavender-public-target_files.zip"
+          otatools="$RUNNER_TEMP/otatools/otatools.zip"
+          test -s "$target_files"
+          test -s "$otatools"
           unzip -t "$target_files" >/dev/null
           unzip -t "$otatools" >/dev/null
           cp "$target_files" "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip"
@@ -246,7 +452,7 @@ jobs:
           sha256sum "$GITHUB_WORKSPACE/gio-public-base/lavender-public-target_files.zip" "$GITHUB_WORKSPACE/gio-public-base/otatools.zip" > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
           printf '%s\n' \
             'schema=gio.os.public-base.v2' \
-            'strategy=30-shard-public-ccache-merge-final-j1' \
+            'strategy=30-shard-public-ccache-split-final-j1' \
             'target=lavender' \
             'android=14' \
             'release=ap2a' \
@@ -258,7 +464,7 @@ jobs:
             'private_gio_source_present=false' \
             'signing_keys_present=false' \
             'hardware_validated=false' > "$GITHUB_WORKSPACE/gio-public-base/PROVENANCE.env"
-          echo "PUBLIC_TARGET_FILES=READY"
+          echo "PUBLIC_BASE_SPLIT_ASSEMBLY=READY"
 
       - name: Upload verified public base
         uses: actions/upload-artifact@v4
@@ -268,23 +474,3 @@ jobs:
           if-no-files-found: error
           retention-days: 2
           compression-level: 0
-
-      - name: Upload final diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: gio-public-diagnostics
-          path: diagnostics/
-          if-no-files-found: ignore
-          retention-days: 2
-
-      - name: Cleanup final mounts
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
-          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
-          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
-          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
-          sudo pkill -f 'nbdkit' >/dev/null 2>&1 || true
