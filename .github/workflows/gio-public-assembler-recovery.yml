@@ -1,0 +1,384 @@
+name: GIO OS Public Assembler Recovery
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-assembler-recovery.yml'
+
+permissions:
+  contents: read
+  actions: write
+
+env:
+  SOURCE_RUN_ID: '34617920321'
+  SOURCE_FABRIC_SHA: '9740e0dfd41945ba1ef228116091f32670f2bb95'
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  CCACHE_MAXSIZE: 4G
+  BUILD_NUMBER: GIOPUBLICA14RECOVERY
+  BUILD_USERNAME: gio-public-recovery
+  BUILD_HOSTNAME: razzo-public-recovery
+  DEVICE_SHA: fd2a90e734a101fad046736970fa4dfb492d7d78
+  KERNEL_SHA: b7b27af5994f7afc11f69cfef194a8dc738842b4
+  VENDOR_SHA: 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+
+concurrency:
+  group: gio-public-assembler-recovery
+  cancel-in-progress: true
+
+jobs:
+  target-files:
+    name: recover-public-target-files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      LOCALIZE_PUBLIC_PACKS: '1'
+      PUBLIC_OUT_RESERVE_GB: '40'
+      CCACHE_DIR: /tmp/gio-target-ccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount exact public source fabric
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Download proven 30-shard compile caches
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccache-shard-*
+          path: ${{ runner.temp }}/gio-cache-download
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34617920321
+
+      - name: Verify and import compile caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR"
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "RECOVERY_CACHE_CAPSULES=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 30
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+
+      - name: Add low-memory safety margin
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 12G "$RUNNER_TEMP/gio-build.swap"
+          sudo chmod 600 "$RUNNER_TEMP/gio-build.swap"
+          sudo mkswap "$RUNNER_TEMP/gio-build.swap" >/dev/null
+          sudo swapon "$RUNNER_TEMP/gio-build.swap"
+          swapon --show
+          free -h
+          df -hT / /mnt
+
+      - name: Build target-files with memory-bounded Soong
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export GOGC=20
+          set +u
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/target-files-artifact" "$GITHUB_WORKSPACE/diagnostics-target"
+          : > "$RUNNER_TEMP/target.log"
+          : > "$RUNNER_TEMP/resources.log"
+          ( while true; do printf '\n=== HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"; free -h; swapon --show; df -hT / /mnt; sleep 30; done ) > "$RUNNER_TEMP/resources.log" 2>&1 &
+          mon=$!
+          set +e
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j1 > >(tee -a "$RUNNER_TEMP/target.log") 2>&1
+          rc=$?
+          set -e
+          kill "$mon" >/dev/null 2>&1 || true
+          wait "$mon" >/dev/null 2>&1 || true
+          cp "$RUNNER_TEMP/resources.log" "$GITHUB_WORKSPACE/diagnostics-target/resource.log" || true
+          tail -n 15000 "$RUNNER_TEMP/target.log" > "$GITHUB_WORKSPACE/diagnostics-target/build-tail.log" || true
+          printf 'build_rc=%s\nsource_run_id=%s\nsource_fabric_sha=%s\nstrategy=assembler-recovery-j1-gogc20-swap12g\n' "$rc" "$SOURCE_RUN_ID" "$SOURCE_FABRIC_SHA" > "$GITHUB_WORKSPACE/diagnostics-target/BUILD.env"
+          test "$rc" -eq 0
+
+      - name: Collect verified target-files
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$target_files" -a -f "$target_files"
+          unzip -t "$target_files" >/dev/null
+          cp "$target_files" "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip"
+          sha256sum "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip" > "$GITHUB_WORKSPACE/target-files-artifact/TARGET_FILES_SHA256"
+
+      - name: Upload target-files
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-target-files
+          path: target-files-artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Upload target diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-target-diagnostics
+          path: diagnostics-target/
+          if-no-files-found: ignore
+          retention-days: 2
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo swapoff "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo rm -f "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f nbdkit >/dev/null 2>&1 || true
+
+  otatools:
+    name: recover-public-otatools
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    env:
+      LOCALIZE_PUBLIC_PACKS: '1'
+      PUBLIC_OUT_RESERVE_GB: '40'
+      CCACHE_DIR: /tmp/gio-otatools-ccache
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount exact public source fabric
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Download proven 30-shard compile caches
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccache-shard-*
+          path: ${{ runner.temp }}/gio-cache-download
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34617920321
+
+      - name: Verify and import compile caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR"
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "RECOVERY_CACHE_CAPSULES=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 30
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+
+      - name: Add low-memory safety margin
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 12G "$RUNNER_TEMP/gio-build.swap"
+          sudo chmod 600 "$RUNNER_TEMP/gio-build.swap"
+          sudo mkswap "$RUNNER_TEMP/gio-build.swap" >/dev/null
+          sudo swapon "$RUNNER_TEMP/gio-build.swap"
+          swapon --show
+          free -h
+
+      - name: Build otatools with memory-bounded Soong
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export GOGC=20
+          set +u
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/otatools-artifact" "$GITHUB_WORKSPACE/diagnostics-otatools"
+          : > "$RUNNER_TEMP/otatools.log"
+          : > "$RUNNER_TEMP/resources.log"
+          ( while true; do printf '\n=== HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"; free -h; swapon --show; df -hT / /mnt; sleep 30; done ) > "$RUNNER_TEMP/resources.log" 2>&1 &
+          mon=$!
+          set +e
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode otatools-package -j1 > >(tee -a "$RUNNER_TEMP/otatools.log") 2>&1
+          rc=$?
+          set -e
+          kill "$mon" >/dev/null 2>&1 || true
+          wait "$mon" >/dev/null 2>&1 || true
+          cp "$RUNNER_TEMP/resources.log" "$GITHUB_WORKSPACE/diagnostics-otatools/resource.log" || true
+          tail -n 15000 "$RUNNER_TEMP/otatools.log" > "$GITHUB_WORKSPACE/diagnostics-otatools/build-tail.log" || true
+          printf 'build_rc=%s\nsource_run_id=%s\nsource_fabric_sha=%s\nstrategy=assembler-recovery-j1-gogc20-swap12g\n' "$rc" "$SOURCE_RUN_ID" "$SOURCE_FABRIC_SHA" > "$GITHUB_WORKSPACE/diagnostics-otatools/BUILD.env"
+          test "$rc" -eq 0
+
+      - name: Collect verified otatools
+        shell: bash
+        run: |
+          set -euo pipefail
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$otatools" -a -f "$otatools"
+          unzip -t "$otatools" >/dev/null
+          cp "$otatools" "$GITHUB_WORKSPACE/otatools-artifact/otatools.zip"
+          sha256sum "$GITHUB_WORKSPACE/otatools-artifact/otatools.zip" > "$GITHUB_WORKSPACE/otatools-artifact/OTATOOLS_SHA256"
+
+      - name: Upload otatools
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-otatools
+          path: otatools-artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Upload otatools diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-otatools-diagnostics
+          path: diagnostics-otatools/
+          if-no-files-found: ignore
+          retention-days: 2
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo swapoff "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo rm -f "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f nbdkit >/dev/null 2>&1 || true
+
+  public-base:
+    name: seal-recovered-public-base
+    needs: [target-files, otatools]
+    if: ${{ needs.target-files.result == 'success' && needs.otatools.result == 'success' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download recovered target-files
+        uses: actions/download-artifact@v4
+        with:
+          name: recovery-target-files
+          path: ${{ runner.temp }}/base
+      - name: Download recovered otatools
+        uses: actions/download-artifact@v4
+        with:
+          name: recovery-otatools
+          path: ${{ runner.temp }}/base
+      - name: Seal provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/base"
+          test -s lavender-public-target_files.zip
+          test -s otatools.zip
+          unzip -t lavender-public-target_files.zip >/dev/null
+          unzip -t otatools.zip >/dev/null
+          sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
+          cat > PROVENANCE.env <<EOF
+          schema=gio.os.public-base.v2
+          strategy=assembler-recovery-j1-gogc20-swap12g
+          source_fabric_run_id=$SOURCE_RUN_ID
+          source_fabric_sha=$SOURCE_FABRIC_SHA
+          target=lavender
+          android=14
+          release=ap2a
+          sourcepack_generation=$GEN
+          device_sha=$DEVICE_SHA
+          kernel_sha=$KERNEL_SHA
+          vendor_sha=$VENDOR_SHA
+          generic_gio_private_jar_hook=true
+          private_gio_source_present=false
+          signing_keys_present=false
+          hardware_validated=false
+          EOF
+          sha256sum -c SHA256SUMS
+          grep -Fx 'sourcepack_generation=v2-20260902' PROVENANCE.env
+          grep -Fx 'target=lavender' PROVENANCE.env
+          grep -Fx "device_sha=$DEVICE_SHA" PROVENANCE.env
+          grep -Fx "kernel_sha=$KERNEL_SHA" PROVENANCE.env
+          grep -Fx "vendor_sha=$VENDOR_SHA" PROVENANCE.env
+          echo PUBLIC_BASE_RECOVERY=VERIFIED
+      - name: Upload recovered public base
+        uses: actions/upload-artifact@v4
+        with:
+          name: gio-public-base
+          path: |
+            ${{ runner.temp }}/base/lavender-public-target_files.zip
+            ${{ runner.temp }}/base/otatools.zip
+            ${{ runner.temp }}/base/SHA256SUMS
+            ${{ runner.temp }}/base/PROVENANCE.env
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+      - name: Dispatch ephemeral private finalizer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run gio-public-private-finalize.yml --repo "$GITHUB_REPOSITORY" -f public_run_id="$GITHUB_RUN_ID" -f public_head_sha="$GITHUB_SHA"
+          echo PRIVATE_FINALIZER_DISPATCHED=YES
