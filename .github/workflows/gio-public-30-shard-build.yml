@@ -14,7 +14,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: gio-public-30-shard-compile-v2
+  group: gio-public-30-shard-compile-v3
   cancel-in-progress: true
 
 env:
