@@ -69,10 +69,10 @@ ccache --set-config=compression=true >/dev/null || true
 ccache --set-config=compression_level=5 >/dev/null || true
 ccache --zero-stats >/dev/null || true
 
-# GitHub-hosted public runners have repeatedly been externally terminated after
-# roughly ten minutes of sustained Soong work. A warmer is therefore deliberately
-# sliced below that window. Timeout/non-zero goal status is acceptable: every
-# successfully compiled object remains useful in ccache and is sealed below.
+# Hosted runners have proven capable of receiving an external shutdown only a
+# few minutes into sustained Soong work. Keep each cache warmer deliberately
+# below that observed window. Non-zero/timeout status is acceptable because the
+# capsule is a best-effort acceleration artifact, never a product correctness gate.
 LOG="${CAPSULE%.tar}.log"
 : > "$LOG"
 goal="${goals[0]}"
@@ -80,7 +80,7 @@ echo "=== SHARD=$SHARD GOAL=$goal START=$(date -u +%FT%TZ) ===" | tee -a "$LOG"
 
 (
   while true; do
-    sleep 45
+    sleep 30
     printf 'GIO_WARMER_HEARTBEAT shard=%s goal=%s time=%s\n' \
       "$SHARD" "$goal" "$(date -u +%FT%TZ)"
   done
@@ -89,8 +89,8 @@ HB_PID=$!
 trap 'kill "$HB_PID" >/dev/null 2>&1 || true; wait "$HB_PID" >/dev/null 2>&1 || true' EXIT
 
 set +e
-timeout --signal=TERM --kill-after=20s 7m \
-  nice -n 5 ionice -c2 -n5 \
+timeout --signal=TERM --kill-after=15s 2m \
+  nice -n 10 ionice -c2 -n7 \
   build/soong/soong_ui.bash --make-mode "$goal" -j1 \
   >> "$LOG" 2>&1
 rc=$?
@@ -108,7 +108,7 @@ find "$CCACHE_DIR" -type d -name tmp -prune -exec rm -rf {} + 2>/dev/null || tru
 
 tar -C "$CCACHE_DIR" -cf "$CAPSULE" .
 sha256sum "$CAPSULE" > "${CAPSULE}.sha256"
-printf 'schema=gio.os.public-compile-cache.v1\nshard=%s\ntarget=lavender\nandroid=14\nrelease=ap2a\nsourcepack_generation=v2-20260902\nprimary_goal=%s\nprimary_goal_rc=%s\nwarm_slice_minutes=7\nprivate_gio_source_present=false\nsigning_keys_present=false\n' \
+printf 'schema=gio.os.public-compile-cache.v1\nshard=%s\ntarget=lavender\nandroid=14\nrelease=ap2a\nsourcepack_generation=v2-20260902\nprimary_goal=%s\nprimary_goal_rc=%s\nwarm_slice_minutes=2\nprivate_gio_source_present=false\nsigning_keys_present=false\n' \
   "$SHARD" "$goal" "$rc" > "${CAPSULE}.env"
 
 echo "PUBLIC_COMPILE_SHARD_${SHARD}=READY"
