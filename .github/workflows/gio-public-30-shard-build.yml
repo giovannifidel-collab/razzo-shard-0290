@@ -56,7 +56,7 @@ jobs:
     name: compile-shard-${{ matrix.shard }}
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     continue-on-error: true
     strategy:
       fail-fast: false
@@ -94,7 +94,7 @@ jobs:
           - '28'
           - '29'
     env:
-      LOCALIZE_PUBLIC_PACKS: '0'
+      LOCALIZE_PUBLIC_PACKS: '1'
       PUBLIC_OUT_RESERVE_GB: '28'
       TAG: ${{ needs.prepare.outputs.tag }}
       SHARD: ${{ matrix.shard }}
@@ -255,15 +255,15 @@ jobs:
               df -hT / /mnt || true
               free -h || true
               ccache --show-stats || true
-              sleep 600
+              sleep 45
             done
-          ) > "$RUNNER_TEMP/gio-final-resources.log" 2>&1 &
+          ) > >(tee -a "$RUNNER_TEMP/gio-final-resources.log") 2>&1 &
           MON_PID=$!
 
           set +e
           timeout --signal=TERM --kill-after=30s 315m \
-            nice -n 5 ionice -c2 -n5 \
-            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j2 \
+            nice -n 10 ionice -c2 -n7 \
+            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1 \
             > >(tee -a "$RUNNER_TEMP/gio-final-build.log") 2>&1
           BUILD_RC=$?
           set -e
@@ -272,7 +272,7 @@ jobs:
 
           cp "$RUNNER_TEMP/gio-final-resources.log" "$GITHUB_WORKSPACE/diagnostics/resource.log" || true
           tail -n 15000 "$RUNNER_TEMP/gio-final-build.log" > "$GITHUB_WORKSPACE/diagnostics/build-tail.log" || true
-          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j2\nsourcepack_generation=%s\n' \
+          printf 'build_rc=%s\nstrategy=30-shard-public-ccache-merge-final-j1\nsourcepack_generation=%s\n' \
             "$BUILD_RC" "$GEN" > "$GITHUB_WORKSPACE/diagnostics/BUILD.env"
 
           if [ "$BUILD_RC" -ne 0 ]; then
@@ -297,7 +297,7 @@ jobs:
             > "$GITHUB_WORKSPACE/gio-public-base/SHA256SUMS"
           printf '%s\n' \
             'schema=gio.os.public-base.v2' \
-            'strategy=30-shard-public-ccache-merge-final-j2' \
+            'strategy=30-shard-public-ccache-merge-final-j1' \
             'target=lavender' \
             'android=14' \
             'release=ap2a' \
