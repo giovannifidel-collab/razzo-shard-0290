@@ -1,0 +1,160 @@
+name: GIO OS Public Target Recovery v2
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-target-recovery-v2.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  SOURCE_RUN_ID: '34617920321'
+  SOURCE_FABRIC_SHA: '9740e0dfd41945ba1ef228116091f32670f2bb95'
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  CCACHE_DIR: /tmp/gio-target-ccache
+  CCACHE_MAXSIZE: 4G
+  BUILD_NUMBER: GIOPUBLICA14RECOVERYV2
+  BUILD_USERNAME: gio-public-recovery
+  BUILD_HOSTNAME: razzo-public-recovery
+  DEVICE_SHA: fd2a90e734a101fad046736970fa4dfb492d7d78
+  KERNEL_SHA: b7b27af5994f7afc11f69cfef194a8dc738842b4
+  VENDOR_SHA: 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+  LOCALIZE_PUBLIC_PACKS: '1'
+  PUBLIC_OUT_RESERVE_GB: '40'
+
+concurrency:
+  group: gio-public-target-recovery-v2
+  cancel-in-progress: false
+
+jobs:
+  target-files:
+    name: recover-public-target-files-serialized
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount exact public source fabric
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+
+      - name: Download proven 30-shard compile caches
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ccache-shard-*
+          path: ${{ runner.temp }}/gio-cache-download
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 34617920321
+
+      - name: Verify and import compile caches
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$CCACHE_DIR"
+          mkdir -p "$CCACHE_DIR"
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "RECOVERY_CACHE_CAPSULES=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 30
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
+            actual="$(sha256sum "$capsule" | awk '{print $1}')"
+            test "$actual" = "$expected"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+
+      - name: Add low-memory safety margin
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo fallocate -l 12G "$RUNNER_TEMP/gio-build.swap"
+          sudo chmod 600 "$RUNNER_TEMP/gio-build.swap"
+          sudo mkswap "$RUNNER_TEMP/gio-build.swap" >/dev/null
+          sudo swapon "$RUNNER_TEMP/gio-build.swap"
+          swapon --show
+          free -h
+          df -hT / /mnt
+
+      - name: Build target-files alone at j1
+        shell: bash
+        run: |
+          set -eo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export GOGC=20
+          set +u
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          set -u
+          mkdir -p "$GITHUB_WORKSPACE/target-files-artifact"
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j1
+
+      - name: Collect verified target-files
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -n "$target_files" -a -f "$target_files"
+          unzip -t "$target_files" >/dev/null
+          cp "$target_files" "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip"
+          sha256sum "$GITHUB_WORKSPACE/target-files-artifact/lavender-public-target_files.zip" > "$GITHUB_WORKSPACE/target-files-artifact/TARGET_FILES_SHA256"
+          printf '%s\n' \
+            'schema=gio.os.public-target-recovery.v2' \
+            'generation=v2-20260902' \
+            'target=lavender' \
+            'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' \
+            'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' \
+            'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' \
+            'private_gio_source_present=false' \
+            'hardware_validated=false' \
+            > "$GITHUB_WORKSPACE/target-files-artifact/PROVENANCE.env"
+
+      - name: Upload target-files
+        uses: actions/upload-artifact@v4
+        with:
+          name: recovery-v2-target-files
+          path: target-files-artifact/
+          if-no-files-found: error
+          retention-days: 2
+          compression-level: 0
+
+      - name: Cleanup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo swapoff "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo rm -f "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f nbdkit >/dev/null 2>&1 || true
