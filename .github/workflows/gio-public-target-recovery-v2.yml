@@ -52,6 +52,34 @@ jobs:
           bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
           bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
 
+      - name: Restore exact Lineage Soong kernel-header definition if source pack omitted it
+        shell: bash
+        run: |
+          set -euo pipefail
+          bp="$AOSP_ROOT/vendor/lineage/build/soong/Android.bp"
+          if [ -s "$bp" ] && grep -q 'name: "generated_kernel_headers"' "$bp"; then
+            echo "GENERATED_KERNEL_HEADERS_SOURCE=PACK_OK"
+            exit 0
+          fi
+
+          meta="/mnt/gio-meta/11/pack-11-projects.json"
+          test -s "$meta"
+          lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"
+          test -n "$lineage_sha" -a "$lineage_sha" != null
+
+          # Restore only the missing public upstream file, from the exact project
+          # commit already recorded by source-pack generation v2-20260902.
+          url="https://raw.githubusercontent.com/crdroidandroid/android_vendor_crdroid/${lineage_sha}/build/soong/Android.bp"
+          tmp="$RUNNER_TEMP/lineage-build-soong-Android.bp"
+          curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "$url" -o "$tmp"
+          grep -q 'name: "generated_kernel_includes"' "$tmp"
+          grep -q 'name: "generated_kernel_header_defaults"' "$tmp"
+          grep -q 'name: "generated_kernel_headers"' "$tmp"
+          mkdir -p "$(dirname "$bp")"
+          cp "$tmp" "$bp"
+          echo "LINEAGE_SOURCE_SHA=$lineage_sha"
+          echo "GENERATED_KERNEL_HEADERS_SOURCE=EXACT_SOURCEPACK_PIN_RESTORED"
+
       - name: Download proven 30-shard compile caches
         uses: actions/download-artifact@v4
         with:
