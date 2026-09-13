@@ -167,7 +167,10 @@ jobs:
           ) &
           HEARTBEAT_PID=$!
           set +e
-          timeout --signal=TERM --kill-after=20s 30m \
+          # Keep the compile slice well below the observed hosted-runner shutdown
+          # window so every stage has time to seal/upload ccache and dispatch its
+          # successor.  A timeout RC is expected checkpointing, not a build error.
+          timeout --signal=TERM --kill-after=20s 12m \
             nice -n 10 ionice -c2 -n7 \
             build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
           rc=$?
