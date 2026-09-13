@@ -18,6 +18,7 @@ permissions:
 
 env:
   SOURCE_RUN_ID: '34617920321'
+  BASELINE_CACHE_TAG: gio-a14-lavender-compilecache-v1-6e2d7d62d9e5
   GEN: v2-20260902
   AOSP_ROOT: /mnt/gio-a14
   OUT_ROOT: /mnt/gio-out
@@ -84,15 +85,23 @@ jobs:
           echo "LINEAGE_SOURCE_SHA=$lineage_sha"
           echo "GENERATED_KERNEL_HEADERS_SOURCE=EXACT_SOURCEPACK_PIN_RESTORED"
 
-      - name: Import proven 30-shard compiler caches
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ccache-shard-*
-          path: ${{ runner.temp }}/gio-cache-download
-          merge-multiple: true
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: 34617920321
+      - name: Import proven 30-shard compiler caches from durable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/gio-cache-download"
+          rm -rf "$dest"
+          mkdir -p "$dest"
+          gh release download "$BASELINE_CACHE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ccache-shard-*.tar' \
+            --pattern 'ccache-shard-*.tar.sha256' \
+            --dir "$dest"
+          count="$(find "$dest" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | wc -l)"
+          echo "DURABLE_BASELINE_CAPSULES=$count"
+          test "$count" -ge 30
 
       - name: Verify baseline cache and restore cumulative recovery cache
         env:
