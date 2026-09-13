@@ -67,8 +67,6 @@ jobs:
           lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"
           test -n "$lineage_sha" -a "$lineage_sha" != null
 
-          # Restore only the missing public upstream file, from the exact project
-          # commit already recorded by source-pack generation v2-20260902.
           url="https://raw.githubusercontent.com/crdroidandroid/android_vendor_crdroid/${lineage_sha}/build/soong/Android.bp"
           tmp="$RUNNER_TEMP/lineage-build-soong-Android.bp"
           curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "$url" -o "$tmp"
@@ -123,7 +121,7 @@ jobs:
           free -h
           df -hT / /mnt
 
-      - name: Build target-files alone at j1
+      - name: Build target-files heartbeat-safe at j2
         shell: bash
         run: |
           set -eo pipefail
@@ -143,7 +141,21 @@ jobs:
           lunch lineage_lavender-ap2a-userdebug
           set -u
           mkdir -p "$GITHUB_WORKSPACE/target-files-artifact"
-          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j1
+          (
+            while true; do
+              printf '\n=== GIO_TARGET_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
+              free -h || true
+              df -hT / /mnt || true
+              ccache --show-stats || true
+              sleep 300
+            done
+          ) &
+          HEARTBEAT_PID=$!
+          trap 'kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true' EXIT
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j2
+          kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true
+          wait "$HEARTBEAT_PID" >/dev/null 2>&1 || true
+          trap - EXIT
 
       - name: Collect verified target-files
         shell: bash
