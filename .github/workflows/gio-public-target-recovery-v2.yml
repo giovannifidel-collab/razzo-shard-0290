@@ -109,19 +109,22 @@ jobs:
           ccache --cleanup >/dev/null || true
           ccache --show-stats || true
 
-      - name: Add low-memory safety margin
+      - name: Preserve runner disk for Android out
         shell: bash
         run: |
           set -euo pipefail
-          sudo fallocate -l 12G "$RUNNER_TEMP/gio-build.swap"
-          sudo chmod 600 "$RUNNER_TEMP/gio-build.swap"
-          sudo mkswap "$RUNNER_TEMP/gio-build.swap" >/dev/null
-          sudo swapon "$RUNNER_TEMP/gio-build.swap"
-          swapon --show
+          # Previous recovery attempts created a 12–24 GiB disk-backed swap file.
+          # The build itself was then cancelled by the hosted runner after setup
+          # had already passed. Keep ephemeral disk for Android out/ instead and
+          # bound memory through single-job Ninja/Soong concurrency.
+          sudo swapoff -a >/dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/gio-build.swap" >/dev/null 2>&1 || true
+          sync
+          echo '=== PRE-BUILD CAPACITY ==='
           free -h
-          df -hT / /mnt
+          df -hT / /mnt /tmp || true
 
-      - name: Build target-files heartbeat-safe at j2
+      - name: Build target-files disk-safe heartbeat at j1
         shell: bash
         run: |
           set -eo pipefail
@@ -135,7 +138,7 @@ jobs:
           export CCACHE_NOHASHDIR=true
           export CCACHE_COMPILERCHECK=content
           export CCACHE_SLOPPINESS=file_macro,locale,time_macros
-          export GOGC=20
+          export GOGC=10
           set +u
           source build/envsetup.sh
           lunch lineage_lavender-ap2a-userdebug
@@ -145,14 +148,14 @@ jobs:
             while true; do
               printf '\n=== GIO_TARGET_HEARTBEAT %s ===\n' "$(date -u +%FT%TZ)"
               free -h || true
-              df -hT / /mnt || true
+              df -hT / /mnt /tmp || true
               ccache --show-stats || true
-              sleep 300
+              sleep 60
             done
           ) &
           HEARTBEAT_PID=$!
           trap 'kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true' EXIT
-          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j2
+          timeout --signal=TERM --kill-after=30s 315m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package -j1
           kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true
           wait "$HEARTBEAT_PID" >/dev/null 2>&1 || true
           trap - EXIT
