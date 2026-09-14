@@ -104,7 +104,7 @@ jobs:
           set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
           sudo swapoff -a >/dev/null 2>&1 || true
           set +e
-          timeout --foreground --signal=TERM --kill-after=10s 180s nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
+          timeout --signal=TERM --kill-after=15s 1080s nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
           rc=$?
           set -e
           echo "SOONG_SLICE_RC=$rc"
