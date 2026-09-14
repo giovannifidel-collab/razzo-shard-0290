@@ -44,7 +44,7 @@ jobs:
   target-files:
     name: recover-public-target-files-checkpointed-v5
     runs-on: ubuntu-24.04
-    timeout-minutes: 28
+    timeout-minutes: 50
     env:
       STAGE: ${{ inputs.stage || '1' }}
     steps:
@@ -129,7 +129,7 @@ jobs:
           ccache --cleanup >/dev/null || true
           ccache --show-stats || true
 
-      - name: Build five-minute slice with reliable timeout checkpoint
+      - name: Build four-minute slice with hard process-group checkpoint
         id: build
         env:
           GH_TOKEN: ${{ github.token }}
@@ -164,11 +164,27 @@ jobs:
           ) &
           heartbeat_pid=$!
 
+          # Run the complete Soong tree in its own session. GNU timeout around
+          # soong_ui was not sufficient because descendants survived the TERM
+          # and the step stayed attached until the job timeout. This explicit
+          # process-group watchdog guarantees that checkpointing regains control.
           set +e
-          timeout --signal=TERM --kill-after=10s 300s \
-            nice -n 10 ionice -c2 -n7 \
-            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
+          setsid bash -c 'exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1' &
+          build_pid=$!
+          (
+            sleep 240
+            if kill -0 "$build_pid" 2>/dev/null; then
+              echo "GIO_RECOVERY_V5_WATCHDOG=TERM pgid=$build_pid"
+              kill -TERM -- "-$build_pid" 2>/dev/null || true
+              sleep 8
+              kill -KILL -- "-$build_pid" 2>/dev/null || true
+            fi
+          ) &
+          watchdog_pid=$!
+          wait "$build_pid"
           rc=$?
+          kill "$watchdog_pid" >/dev/null 2>&1 || true
+          wait "$watchdog_pid" >/dev/null 2>&1 || true
           set -e
           kill "$heartbeat_pid" >/dev/null 2>&1 || true
           wait "$heartbeat_pid" >/dev/null 2>&1 || true
