@@ -1,0 +1,284 @@
+name: GIO OS Public Target Recovery v5
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Recovery slice number
+        required: false
+        default: '1'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-target-recovery-v5.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  SOURCE_RUN_ID: '34617920321'
+  BASELINE_CACHE_TAG: gio-a14-lavender-compilecache-v1-6e2d7d62d9e5
+  PREVIOUS_RECOVERY_CACHE_TAG: gio-a14-lavender-recovery-cache-v4
+  RECOVERY_CACHE_TAG: gio-a14-lavender-recovery-cache-v5
+  PUBLIC_BASE_TAG: gio-a14-lavender-public-base-v3
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  CCACHE_DIR: /tmp/gio-target-ccache
+  CCACHE_MAXSIZE: 512M
+  BUILD_NUMBER: GIOPUBLICA14RECOVERYV5
+  BUILD_USERNAME: gio-public-recovery
+  BUILD_HOSTNAME: razzo-public-recovery
+  DEVICE_SHA: fd2a90e734a101fad046736970fa4dfb492d7d78
+  KERNEL_SHA: b7b27af5994f7afc11f69cfef194a8dc738842b4
+  VENDOR_SHA: 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+  LOCALIZE_PUBLIC_PACKS: '0'
+  PUBLIC_OUT_RESERVE_GB: '28'
+
+concurrency:
+  group: gio-public-target-recovery-v5
+  cancel-in-progress: false
+
+jobs:
+  target-files:
+    name: recover-public-target-files-checkpointed-v5
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      STAGE: ${{ inputs.stage || '1' }}
+    steps:
+      - name: Checkout recovery controller
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount exact public source fabric on demand
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+          test "$GEN" = v2-20260902
+          echo "RECOVERY_STAGE=${STAGE}"
+
+      - name: Restore exact Lineage Soong kernel-header definition if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          bp="$AOSP_ROOT/vendor/lineage/build/soong/Android.bp"
+          if [ -s "$bp" ] && grep -q 'name: "generated_kernel_headers"' "$bp"; then
+            echo GENERATED_KERNEL_HEADERS_SOURCE=PACK_OK
+            exit 0
+          fi
+          meta=/mnt/gio-meta/11/pack-11-projects.json
+          test -s "$meta"
+          lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"
+          test -n "$lineage_sha" -a "$lineage_sha" != null
+          tmp="$RUNNER_TEMP/lineage-build-soong-Android.bp"
+          curl -fL --retry 8 --retry-all-errors --connect-timeout 20 \
+            "https://raw.githubusercontent.com/crdroidandroid/android_vendor_crdroid/${lineage_sha}/build/soong/Android.bp" -o "$tmp"
+          grep -q 'name: "generated_kernel_headers"' "$tmp"
+          mkdir -p "$(dirname "$bp")"
+          cp "$tmp" "$bp"
+          echo "LINEAGE_SOURCE_SHA=$lineage_sha"
+
+      - name: Restore verified baseline and cumulative compiler cache
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="$RUNNER_TEMP/gio-cache-download"
+          rm -rf "$dest" "$CCACHE_DIR"
+          mkdir -p "$dest" "$CCACHE_DIR" "$RUNNER_TEMP/recovery-cache"
+          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$dest"
+          mapfile -t capsules < <(find "$dest" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
+          echo "RECOVERY_BASELINE_CAPSULES=${#capsules[@]}"
+          test "${#capsules[@]}" -ge 30
+          for capsule in "${capsules[@]}"; do
+            sidecar="${capsule}.sha256"
+            test -s "$sidecar"
+            test "$(sha256sum "$capsule" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
+            tar -C "$CCACHE_DIR" -xf "$capsule"
+          done
+          restore_tag=''
+          if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            restore_tag="$RECOVERY_CACHE_TAG"
+          elif gh release view "$PREVIOUS_RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            restore_tag="$PREVIOUS_RECOVERY_CACHE_TAG"
+          fi
+          if [ -n "$restore_tag" ]; then
+            gh release download "$restore_tag" --repo "$GITHUB_REPOSITORY" \
+              --pattern recovery-ccache.tar.zst --pattern recovery-ccache.tar.zst.sha256 \
+              --dir "$RUNNER_TEMP/recovery-cache" || true
+            archive="$RUNNER_TEMP/recovery-cache/recovery-ccache.tar.zst"
+            sidecar="${archive}.sha256"
+            if [ -s "$archive" ] && [ -s "$sidecar" ]; then
+              test "$(sha256sum "$archive" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
+              zstd -dc "$archive" | tar -C "$CCACHE_DIR" -xf -
+              echo "CUMULATIVE_RECOVERY_CACHE_RESTORED_FROM=$restore_tag"
+            fi
+          fi
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --set-config=compression=true >/dev/null || true
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+
+      - name: Build five-minute slice with hard process-group watchdog
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1
+          unset CCACHE_DISABLE || true
+          export CCACHE_EXEC="$(command -v ccache)"
+          export CCACHE_DIR="$CCACHE_DIR"
+          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
+          export CCACHE_BASEDIR="$AOSP_ROOT"
+          export CCACHE_NOHASHDIR=true
+          export CCACHE_COMPILERCHECK=content
+          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export GOGC=10
+          set +u
+          source build/envsetup.sh
+          lunch lineage_lavender-ap2a-userdebug
+          set -u
+          sudo swapoff -a >/dev/null 2>&1 || true
+          mkdir -p "$GITHUB_WORKSPACE/public-base"
+
+          start="$(date +%s)"
+          stop=$((start + 300))
+          echo "SLICE_HARD_STOP_EPOCH=$stop"
+
+          setsid bash -c 'exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1' &
+          build_pid=$!
+          echo "SOONG_PROCESS_GROUP=$build_pid"
+
+          while kill -0 "$build_pid" 2>/dev/null; do
+            now="$(date +%s)"
+            if [ "$now" -ge "$stop" ]; then
+              echo "SLICE_DEADLINE_REACHED=1"
+              kill -TERM -- "-$build_pid" 2>/dev/null || true
+              sleep 8
+              kill -KILL -- "-$build_pid" 2>/dev/null || true
+              break
+            fi
+            echo "GIO_RECOVERY_V5_HEARTBEAT stage=$STAGE remaining=$((stop-now))"
+            free -h || true
+            ccache --show-stats || true
+            sleep 30
+          done
+          set +e
+          wait "$build_pid"
+          rc=$?
+          set -e
+          echo "SOONG_SLICE_RC=$rc"
+
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          if [ -n "$target_files" ] && [ -f "$target_files" ] && [ -n "$otatools" ] && [ -f "$otatools" ]; then
+            echo complete=true >> "$GITHUB_OUTPUT"
+            echo PUBLIC_BASE_BUILD_COMPLETE=true
+            exit 0
+          fi
+          echo complete=false >> "$GITHUB_OUTPUT"
+
+          # A bounded watchdog termination is expected. Any fast ordinary failure remains fatal.
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 137 ] && [ "$rc" -ne 143 ]; then
+            echo "UNEXPECTED_BUILD_RC=$rc" >&2
+            exit "$rc"
+          fi
+
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --cleanup >/dev/null || true
+          ccache --show-stats || true
+          archive="$RUNNER_TEMP/recovery-ccache.tar.zst"
+          tar -C "$CCACHE_DIR" -cf - . | zstd -1 -T2 -o "$archive"
+          test -s "$archive"
+          test "$(stat -c%s "$archive")" -lt 1900000000
+          sha256sum "$archive" > "${archive}.sha256"
+          if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'GIO OS Lavender cumulative recovery ccache v5' \
+              --notes 'Public compiler cache only; no private GIO source or signing keys.' --prerelease
+          fi
+          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "${archive}.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+          echo "RECOVERY_CACHE_STAGE_${STAGE}=PUBLISHED"
+
+      - name: Queue next recovery slice
+        if: ${{ steps.build.outputs.complete != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="${STAGE:-1}"
+          case "$stage" in (*[!0-9]*|'') stage=1;; esac
+          if [ "$stage" -ge 36 ]; then
+            echo "RECOVERY_STAGE_LIMIT_REACHED=$stage" >&2
+            exit 1
+          fi
+          next=$((stage + 1))
+          gh workflow run gio-public-target-recovery-v5.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"
+          echo "NEXT_RECOVERY_STAGE=$next"
+
+      - name: Collect and publish verified public base
+        if: ${{ steps.build.outputs.complete == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          test -f "$target_files"; test -f "$otatools"
+          unzip -t "$target_files" >/dev/null
+          unzip -t "$otatools" >/dev/null
+          cp "$target_files" "$GITHUB_WORKSPACE/public-base/lavender-public-target_files.zip"
+          cp "$otatools" "$GITHUB_WORKSPACE/public-base/otatools.zip"
+          cd "$GITHUB_WORKSPACE/public-base"
+          sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
+          printf '%s\n' \
+            'schema=gio.os.public-base.v3' \
+            'sourcepack_generation=v2-20260902' \
+            'target=lavender' \
+            'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' \
+            'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' \
+            'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' \
+            'private_gio_source_present=false' \
+            'hardware_validated=false' > PROVENANCE.env
+          if ! gh release view "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'GIO OS Lavender verified public base v3' \
+              --notes 'Verified public target-files and otatools; private GIO payload absent.' --prerelease
+          fi
+          for f in lavender-public-target_files.zip otatools.zip SHA256SUMS PROVENANCE.env; do
+            size="$(stat -c%s "$f")"
+            if [ "$size" -gt 1900000000 ]; then
+              split -b 1800M -d -a 3 "$f" "${f}.part-"
+              gh release upload "$PUBLIC_BASE_TAG" "${f}.part-"* --repo "$GITHUB_REPOSITORY" --clobber
+            else
+              gh release upload "$PUBLIC_BASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
+            fi
+          done
+          echo PUBLIC_BASE_V3=VERIFIED_AND_RELEASED
+
+      - name: Cleanup mounts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f nbdkit >/dev/null 2>&1 || true
