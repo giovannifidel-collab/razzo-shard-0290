@@ -92,20 +92,8 @@ jobs:
           set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
           sudo swapoff -a >/dev/null 2>&1 || true
           set +e
-          setsid nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1 &
-          slice_pid=$!
-          (
-            sleep 600
-            kill -TERM -- "-$slice_pid" >/dev/null 2>&1 || true
-            sleep 10
-            kill -KILL -- "-$slice_pid" >/dev/null 2>&1 || true
-          ) & watchdog_pid=$!
-          wait "$slice_pid"; rc=$?
-          kill "$watchdog_pid" >/dev/null 2>&1 || true
-          wait "$watchdog_pid" >/dev/null 2>&1 || true
-          kill -TERM -- "-$slice_pid" >/dev/null 2>&1 || true
-          sleep 1
-          kill -KILL -- "-$slice_pid" >/dev/null 2>&1 || true
+          timeout --signal=TERM --kill-after=20s 10m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
+          rc=$?
           set -e; echo "SOONG_SLICE_RC=$rc"
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null || true)"; otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null || true)"
           if [ -n "$target_files" ] && [ -n "$otatools" ]; then echo complete=true >> "$GITHUB_OUTPUT"; exit 0; fi
