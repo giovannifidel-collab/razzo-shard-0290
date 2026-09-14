@@ -1,0 +1,158 @@
+name: GIO OS Public Target Recovery v8
+
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Recovery slice number
+        required: false
+        default: '1'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/gio-public-target-recovery-v8.yml'
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  SOURCE_RUN_ID: '34617920321'
+  BASELINE_CACHE_TAG: gio-a14-lavender-compilecache-v1-6e2d7d62d9e5
+  PREVIOUS_RECOVERY_CACHE_TAG: gio-a14-lavender-recovery-cache-v7
+  RECOVERY_CACHE_TAG: gio-a14-lavender-recovery-cache-v8
+  PUBLIC_BASE_TAG: gio-a14-lavender-public-base-v3
+  GEN: v2-20260902
+  AOSP_ROOT: /mnt/gio-a14
+  OUT_ROOT: /mnt/gio-out
+  CCACHE_DIR: /tmp/gio-target-ccache
+  CCACHE_MAXSIZE: 512M
+  DEVICE_SHA: fd2a90e734a101fad046736970fa4dfb492d7d78
+  KERNEL_SHA: b7b27af5994f7afc11f69cfef194a8dc738842b4
+  VENDOR_SHA: 483e3e7ca5828c54d8b4408b87ee14069a8d027b
+  LOCALIZE_PUBLIC_PACKS: '0'
+  PUBLIC_OUT_RESERVE_GB: '28'
+
+concurrency:
+  group: gio-public-target-recovery-v8
+  cancel-in-progress: false
+
+jobs:
+  target-files:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      STAGE: ${{ inputs.stage || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Mount exact public source fabric
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/ci/gio_public_diskless_setup.sh" "$AOSP_ROOT" "$OUT_ROOT" "$GEN"
+          bash "$GITHUB_WORKSPACE/ci/gio_public_apply_hook.sh" "$AOSP_ROOT"
+          test "$GEN" = v2-20260902
+
+      - name: Restore exact Lineage kernel-header definition
+        run: |
+          set -euo pipefail
+          bp="$AOSP_ROOT/vendor/lineage/build/soong/Android.bp"
+          if [ -s "$bp" ] && grep -q 'name: "generated_kernel_headers"' "$bp"; then exit 0; fi
+          meta=/mnt/gio-meta/11/pack-11-projects.json
+          lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"
+          test -n "$lineage_sha" -a "$lineage_sha" != null
+          curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "https://raw.githubusercontent.com/crdroidandroid/android_vendor_crdroid/${lineage_sha}/build/soong/Android.bp" -o "$RUNNER_TEMP/lineage.bp"
+          grep -q 'name: "generated_kernel_headers"' "$RUNNER_TEMP/lineage.bp"
+          cp "$RUNNER_TEMP/lineage.bp" "$bp"
+
+      - name: Restore verified compiler caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export CCACHE_DIR="$CCACHE_DIR"
+          dest="$RUNNER_TEMP/cache"
+          rm -rf "$dest" "$CCACHE_DIR"; mkdir -p "$dest" "$CCACHE_DIR" "$RUNNER_TEMP/recovery"
+          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$dest"
+          mapfile -t capsules < <(find "$dest" -type f -name 'ccache-shard-*.tar' | sort)
+          test "${#capsules[@]}" -ge 30
+          for f in "${capsules[@]}"; do test "$(sha256sum "$f"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$f.sha256")"; tar -C "$CCACHE_DIR" -xf "$f"; done
+          if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$RECOVERY_CACHE_TAG"; elif gh release view "$PREVIOUS_RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$PREVIOUS_RECOVERY_CACHE_TAG"; else tag=''; fi
+          if [ -n "$tag" ]; then
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern recovery-ccache.tar.zst --pattern recovery-ccache.tar.zst.sha256 --dir "$RUNNER_TEMP/recovery" || true
+            a="$RUNNER_TEMP/recovery/recovery-ccache.tar.zst"
+            if [ -s "$a" ] && [ -s "$a.sha256" ]; then test "$(sha256sum "$a"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$a.sha256")"; zstd -dc "$a" | tar -C "$CCACHE_DIR" -xf -; fi
+          fi
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
+          ccache --show-stats || true
+
+      - name: Build bounded slice and checkpoint
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$AOSP_ROOT"
+          export USE_CCACHE=1 CCACHE_DIR="$CCACHE_DIR" CCACHE_MAXSIZE="$CCACHE_MAXSIZE" CCACHE_BASEDIR="$AOSP_ROOT" CCACHE_NOHASHDIR=true CCACHE_COMPILERCHECK=content GOGC=10
+          export CCACHE_EXEC="$(command -v ccache)"
+          unset CCACHE_DISABLE || true
+          set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
+          sudo swapoff -a >/dev/null 2>&1 || true
+          set +e
+          timeout --foreground --signal=TERM --kill-after=10s 180s nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
+          rc=$?
+          set -e
+          echo "SOONG_SLICE_RC=$rc"
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null || true)"
+          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null || true)"
+          if [ -n "$target_files" ] && [ -n "$otatools" ]; then echo complete=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          echo complete=false >> "$GITHUB_OUTPUT"
+          case "$rc" in 0|124|137|143) ;; *) exit "$rc";; esac
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null; ccache --cleanup >/dev/null || true; ccache --show-stats || true
+          archive="$RUNNER_TEMP/recovery-ccache.tar.zst"
+          tar -C "$CCACHE_DIR" -cf - . | zstd -1 -T2 -o "$archive"
+          test -s "$archive"; test "$(stat -c%s "$archive")" -lt 1900000000
+          sha256sum "$archive" > "$archive.sha256"
+          if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender recovery ccache v8' --notes 'Public compiler cache only.' --prerelease; fi
+          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "$archive.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+
+      - name: Queue next slice
+        if: ${{ steps.build.outputs.complete != 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          stage="${STAGE:-1}"; case "$stage" in (*[!0-9]*|'') stage=1;; esac
+          test "$stage" -lt 48
+          next=$((stage+1))
+          gh workflow run gio-public-target-recovery-v8.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"
+
+      - name: Publish verified public base
+        if: ${{ steps.build.outputs.complete == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/public-base"
+          tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit)"; ota="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit)"
+          unzip -t "$tf" >/dev/null; unzip -t "$ota" >/dev/null
+          cp "$tf" "$GITHUB_WORKSPACE/public-base/lavender-public-target_files.zip"; cp "$ota" "$GITHUB_WORKSPACE/public-base/otatools.zip"
+          cd "$GITHUB_WORKSPACE/public-base"; sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
+          printf '%s\n' 'schema=gio.os.public-base.v3' 'sourcepack_generation=v2-20260902' 'target=lavender' 'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' 'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' 'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' 'private_gio_source_present=false' 'hardware_validated=false' > PROVENANCE.env
+          if ! gh release view "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender verified public base v3' --notes 'Verified public base.' --prerelease; fi
+          for f in lavender-public-target_files.zip otatools.zip SHA256SUMS PROVENANCE.env; do gh release upload "$PUBLIC_BASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber; done
+
+      - name: Cleanup mounts
+        if: always()
+        run: |
+          set +e
+          sudo umount "$AOSP_ROOT" >/dev/null 2>&1 || true
+          for mp in /mnt/gio-lower/*; do [ -d "$mp" ] && sudo umount "$mp" >/dev/null 2>&1 || true; done
+          sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
+          for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
+          sudo pkill -f nbdkit >/dev/null 2>&1 || true
