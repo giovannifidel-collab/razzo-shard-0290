@@ -91,10 +91,43 @@ jobs:
           export CCACHE_EXEC="$(command -v ccache)"; unset CCACHE_DISABLE || true
           set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
           sudo swapoff -a >/dev/null 2>&1 || true
+
+          # `timeout` only signalled the top-level Soong process in the previous
+          # run, leaving descendants alive until the 45-minute job timeout. Run
+          # the slice in its own session/process-group and explicitly terminate
+          # the whole group at ten minutes so checkpoint/upload/dispatch always
+          # get execution time before the hosted-runner limit.
+          build_log="$RUNNER_TEMP/soong-slice.log"
           set +e
-          timeout --signal=TERM --kill-after=20s 10m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
-          rc=$?
-          set -e; echo "SOONG_SLICE_RC=$rc"
+          setsid bash -c 'exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1' \
+            > >(tee "$build_log") 2>&1 &
+          build_pid=$!
+          rc=0
+          deadline=$((SECONDS + 600))
+          while kill -0 "$build_pid" 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "SOONG_SLICE_DEADLINE_REACHED pid=$build_pid"
+              kill -TERM -- "-$build_pid" 2>/dev/null || true
+              for _ in $(seq 1 10); do
+                kill -0 "$build_pid" 2>/dev/null || break
+                sleep 1
+              done
+              if kill -0 "$build_pid" 2>/dev/null; then
+                kill -KILL -- "-$build_pid" 2>/dev/null || true
+              fi
+              wait "$build_pid" 2>/dev/null || true
+              rc=124
+              break
+            fi
+            sleep 15
+          done
+          if [ "$rc" -eq 0 ]; then
+            wait "$build_pid"
+            rc=$?
+          fi
+          set -e
+          echo "SOONG_SLICE_RC=$rc"
+
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null || true)"; otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null || true)"
           if [ -n "$target_files" ] && [ -n "$otatools" ]; then echo complete=true >> "$GITHUB_OUTPUT"; exit 0; fi
           echo complete=false >> "$GITHUB_OUTPUT"; case "$rc" in 0|124|137|143) ;; *) exit "$rc";; esac
