@@ -37,7 +37,7 @@ jobs:
   target-files:
     name: recover-public-target-files-persistent-out
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 45
     env:
       STAGE: ${{ inputs.stage || '1' }}
     steps:
@@ -78,7 +78,7 @@ jobs:
           key: gio-a14-lavender-soong-out-v4-stage-${{ inputs.stage || '1' }}
           restore-keys: |
             gio-a14-lavender-soong-out-v4-stage-
-      - name: Build target-files and otatools in short bounded slice
+      - name: Build target-files and otatools in hard-bounded slice
         id: build
         shell: bash
         run: |
@@ -87,11 +87,22 @@ jobs:
           set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
           if ! swapon --show | grep -q .; then sudo fallocate -l 8G "$RUNNER_TEMP/gio.swap"; sudo chmod 600 "$RUNNER_TEMP/gio.swap"; sudo mkswap "$RUNNER_TEMP/gio.swap" >/dev/null; sudo swapon "$RUNNER_TEMP/gio.swap"; fi
           (while true; do echo "=== GIO_RECOVERY_V4_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="; free -h || true; df -hT / /mnt /tmp || true; sleep 60; done) & hp=$!
-          set +e; timeout --signal=TERM --kill-after=20s 5m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1; rc=$?; set -e
+          set +e
+          setsid bash -c 'exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1' & bp=$!
+          deadline=$((SECONDS + 480))
+          while kill -0 "$bp" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 5; done
+          if kill -0 "$bp" >/dev/null 2>&1; then
+            echo "GIO_RECOVERY_V4_SLICE_EXPIRED=1"
+            kill -TERM -- "-$bp" >/dev/null 2>&1 || true
+            sleep 10
+            kill -KILL -- "-$bp" >/dev/null 2>&1 || true
+          fi
+          wait "$bp"; rc=$?
+          set -e
           kill "$hp" >/dev/null 2>&1 || true; wait "$hp" >/dev/null 2>&1 || true; echo "rc=$rc" >> "$GITHUB_OUTPUT"
           tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null)"; ota="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null)"
           if [ -n "$tf" ] && [ -f "$tf" ] && [ -n "$ota" ] && [ -f "$ota" ]; then echo complete=true >> "$GITHUB_OUTPUT"; else echo complete=false >> "$GITHUB_OUTPUT"; fi
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then exit "$rc"; fi
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && [ "$rc" -ne 143 ]; then exit "$rc"; fi
       - name: Queue successor before checkpoint upload
         if: ${{ steps.build.outputs.complete != 'true' }}
         env: {GH_TOKEN: "${{ github.token }}"}
