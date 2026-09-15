@@ -66,24 +66,15 @@ jobs:
         run: |
           set -euo pipefail
           bp="$AOSP_ROOT/vendor/lineage/build/soong/Android.bp"
-          if [ -s "$bp" ] && grep -q 'name: "generated_kernel_headers"' "$bp"; then
-            echo "GENERATED_KERNEL_HEADERS_SOURCE=PACK_OK"
-            exit 0
-          fi
-          meta="/mnt/gio-meta/11/pack-11-projects.json"
-          test -s "$meta"
-          lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"
-          test -n "$lineage_sha" -a "$lineage_sha" != null
+          if [ -s "$bp" ] && grep -q 'name: "generated_kernel_headers"' "$bp"; then echo "GENERATED_KERNEL_HEADERS_SOURCE=PACK_OK"; exit 0; fi
+          meta="/mnt/gio-meta/11/pack-11-projects.json"; test -s "$meta"
+          lineage_sha="$(jq -r '.projects[] | select(.path=="vendor/lineage") | .sha' "$meta")"; test -n "$lineage_sha" -a "$lineage_sha" != null
           url="https://raw.githubusercontent.com/crdroidandroid/android_vendor_crdroid/${lineage_sha}/build/soong/Android.bp"
           tmp="$RUNNER_TEMP/lineage-build-soong-Android.bp"
           curl -fL --retry 8 --retry-all-errors --connect-timeout 20 "$url" -o "$tmp"
-          grep -q 'name: "generated_kernel_includes"' "$tmp"
-          grep -q 'name: "generated_kernel_header_defaults"' "$tmp"
-          grep -q 'name: "generated_kernel_headers"' "$tmp"
-          mkdir -p "$(dirname "$bp")"
-          cp "$tmp" "$bp"
-          echo "LINEAGE_SOURCE_SHA=$lineage_sha"
-          echo "GENERATED_KERNEL_HEADERS_SOURCE=EXACT_SOURCEPACK_PIN_RESTORED"
+          grep -q 'name: "generated_kernel_includes"' "$tmp"; grep -q 'name: "generated_kernel_header_defaults"' "$tmp"; grep -q 'name: "generated_kernel_headers"' "$tmp"
+          mkdir -p "$(dirname "$bp")"; cp "$tmp" "$bp"
+          echo "LINEAGE_SOURCE_SHA=$lineage_sha"; echo "GENERATED_KERNEL_HEADERS_SOURCE=EXACT_SOURCEPACK_PIN_RESTORED"
 
       - name: Import proven 30-shard compiler caches from durable release
         env:
@@ -91,12 +82,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dest="$RUNNER_TEMP/gio-cache-download"
-          rm -rf "$dest"; mkdir -p "$dest"
-          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$dest"
-          count="$(find "$dest" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | wc -l)"
-          echo "DURABLE_BASELINE_CAPSULES=$count"; test "$count" -ge 30
+          dest="$RUNNER_TEMP/gio-cache-download"; rm -rf "$dest"; mkdir -p "$dest"
+          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$dest"
+          count="$(find "$dest" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | wc -l)"; echo "DURABLE_BASELINE_CAPSULES=$count"; test "$count" -ge 30
 
       - name: Verify baseline cache and restore cumulative recovery cache
         env:
@@ -105,27 +93,15 @@ jobs:
         run: |
           set -euo pipefail
           rm -rf "$CCACHE_DIR"; mkdir -p "$CCACHE_DIR"
-          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
-          test "${#capsules[@]}" -ge 30
-          for capsule in "${capsules[@]}"; do
-            sidecar="${capsule}.sha256"; test -s "$sidecar"
-            test "$(sha256sum "$capsule" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
-            tar -C "$CCACHE_DIR" -xf "$capsule"
-          done
+          mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort); test "${#capsules[@]}" -ge 30
+          for capsule in "${capsules[@]}"; do sidecar="${capsule}.sha256"; test -s "$sidecar"; test "$(sha256sum "$capsule" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"; tar -C "$CCACHE_DIR" -xf "$capsule"; done
           mkdir -p "$RUNNER_TEMP/recovery-cache"
           if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release download "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'recovery-ccache.tar.zst' --pattern 'recovery-ccache.tar.zst.sha256' --dir "$RUNNER_TEMP/recovery-cache" || true
             archive="$RUNNER_TEMP/recovery-cache/recovery-ccache.tar.zst"; sidecar="${archive}.sha256"
-            if [ -s "$archive" ] && [ -s "$sidecar" ]; then
-              test "$(sha256sum "$archive" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
-              zstd -dc "$archive" | tar -C "$CCACHE_DIR" -xf -
-              echo CUMULATIVE_RECOVERY_CACHE=RESTORED
-            fi
+            if [ -s "$archive" ] && [ -s "$sidecar" ]; then test "$(sha256sum "$archive" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"; zstd -dc "$archive" | tar -C "$CCACHE_DIR" -xf -; echo CUMULATIVE_RECOVERY_CACHE=RESTORED; fi
           fi
-          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
-          ccache --set-config=compression=true >/dev/null || true
-          ccache --cleanup >/dev/null || true
-          ccache --show-stats || true
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null; ccache --set-config=compression=true >/dev/null || true; ccache --cleanup >/dev/null || true; ccache --show-stats || true
 
       - name: Build target-files and otatools in bounded slice
         id: build
@@ -133,31 +109,18 @@ jobs:
         run: |
           set -eo pipefail
           cd "$AOSP_ROOT"
-          export USE_CCACHE=1
-          unset CCACHE_DISABLE || true
-          export CCACHE_EXEC="$(command -v ccache)"
-          export CC_WRAPPER="$CCACHE_EXEC"
-          export CXX_WRAPPER="$CCACHE_EXEC"
-          export CCACHE_DIR="$CCACHE_DIR"
-          export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
-          export CCACHE_BASEDIR="$AOSP_ROOT"
-          export CCACHE_NOHASHDIR=true
-          export CCACHE_COMPILERCHECK=content
-          export CCACHE_SLOPPINESS=file_macro,locale,time_macros
+          export USE_CCACHE=1; unset CCACHE_DISABLE || true; export CCACHE_EXEC="$(command -v ccache)"; export CC_WRAPPER="$CCACHE_EXEC"; export CXX_WRAPPER="$CCACHE_EXEC"
+          export CCACHE_DIR="$CCACHE_DIR" CCACHE_MAXSIZE="$CCACHE_MAXSIZE" CCACHE_BASEDIR="$AOSP_ROOT" CCACHE_NOHASHDIR=true CCACHE_COMPILERCHECK=content CCACHE_SLOPPINESS=file_macro,locale,time_macros
           export GOGC=10
-          set +u
-          source build/envsetup.sh
-          lunch lineage_lavender-ap2a-userdebug
-          set -u
-          sudo swapoff -a >/dev/null 2>&1 || true
+          set +u; source build/envsetup.sh; lunch lineage_lavender-ap2a-userdebug; set -u
+          # Do not disable the runner's provisioned swap. Previous run reached 15 GiB/15 GiB RAM with swap forced off and the hosted agent killed the job.
+          if ! swapon --show | grep -q .; then sudo fallocate -l 8G "$RUNNER_TEMP/gio.swap"; sudo chmod 600 "$RUNNER_TEMP/gio.swap"; sudo mkswap "$RUNNER_TEMP/gio.swap" >/dev/null; sudo swapon "$RUNNER_TEMP/gio.swap"; fi
+          echo MEMORY_HEADROOM=PASS; free -h; swapon --show
           mkdir -p "$GITHUB_WORKSPACE/public-base"
-          (while true; do echo "=== GIO_RECOVERY_V3_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="; free -h || true; df -hT / /mnt /tmp || true; ccache --show-stats || true; sleep 60; done) &
-          HEARTBEAT_PID=$!
+          (while true; do echo "=== GIO_RECOVERY_V3_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="; free -h || true; df -hT / /mnt /tmp || true; ccache --show-stats || true; sleep 60; done) & HEARTBEAT_PID=$!
           set +e
-          timeout --signal=TERM --kill-after=20s 8m nice -n 10 ionice -c2 -n7 \
-            build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
-          rc=$?
-          set -e
+          timeout --signal=TERM --kill-after=20s 8m nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
+          rc=$?; set -e
           kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true; wait "$HEARTBEAT_PID" >/dev/null 2>&1 || true
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
@@ -173,13 +136,10 @@ jobs:
         run: |
           set -euo pipefail
           ccache --max-size "$CCACHE_MAXSIZE" >/dev/null; ccache --cleanup >/dev/null || true; ccache --show-stats || true
-          archive="$RUNNER_TEMP/recovery-ccache.tar.zst"
-          tar -C "$CCACHE_DIR" -cf - . | zstd -1 -T2 -o "$archive"
-          test -s "$archive"; test "$(stat -c%s "$archive")" -lt 1900000000
-          sha256sum "$archive" > "${archive}.sha256"
+          archive="$RUNNER_TEMP/recovery-ccache.tar.zst"; tar -C "$CCACHE_DIR" -cf - . | zstd -1 -T2 -o "$archive"
+          test -s "$archive"; test "$(stat -c%s "$archive")" -lt 1900000000; sha256sum "$archive" > "${archive}.sha256"
           if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender cumulative recovery ccache v3' --notes 'Public compiler cache only; no private GIO source or signing keys.' --prerelease; fi
-          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "${archive}.sha256" --repo "$GITHUB_REPOSITORY" --clobber
-          echo "RECOVERY_CACHE_STAGE_${STAGE}=PUBLISHED"
+          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "${archive}.sha256" --repo "$GITHUB_REPOSITORY" --clobber; echo "RECOVERY_CACHE_STAGE_${STAGE}=PUBLISHED"
 
       - name: Queue next bounded recovery slice
         if: ${{ steps.build.outputs.complete != 'true' }}
@@ -190,9 +150,7 @@ jobs:
           set -euo pipefail
           stage="${STAGE:-1}"; case "$stage" in (*[!0-9]*|'') stage=1;; esac
           if [ "$stage" -ge 30 ]; then echo "RECOVERY_STAGE_LIMIT_REACHED=$stage" >&2; exit 1; fi
-          next=$((stage + 1))
-          gh workflow run gio-public-target-recovery-v3.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"
-          echo "NEXT_RECOVERY_STAGE=$next"
+          next=$((stage + 1)); gh workflow run gio-public-target-recovery-v3.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"; echo "NEXT_RECOVERY_STAGE=$next"
 
       - name: Collect and publish verified public base
         if: ${{ steps.build.outputs.complete == 'true' }}
@@ -201,8 +159,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
-          otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
+          target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"; otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
           test -f "$target_files"; test -f "$otatools"; unzip -t "$target_files" >/dev/null; unzip -t "$otatools" >/dev/null
           cp "$target_files" "$GITHUB_WORKSPACE/public-base/lavender-public-target_files.zip"; cp "$otatools" "$GITHUB_WORKSPACE/public-base/otatools.zip"
           cd "$GITHUB_WORKSPACE/public-base"; sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
