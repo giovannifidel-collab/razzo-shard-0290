@@ -92,16 +92,11 @@ jobs:
         run: |
           set -euo pipefail
           dest="$RUNNER_TEMP/gio-cache-download"
-          rm -rf "$dest"
-          mkdir -p "$dest"
-          gh release download "$BASELINE_CACHE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern 'ccache-shard-*.tar' \
-            --pattern 'ccache-shard-*.tar.sha256' \
-            --dir "$dest"
+          rm -rf "$dest"; mkdir -p "$dest"
+          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$dest"
           count="$(find "$dest" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | wc -l)"
-          echo "DURABLE_BASELINE_CAPSULES=$count"
-          test "$count" -ge 30
+          echo "DURABLE_BASELINE_CAPSULES=$count"; test "$count" -ge 30
 
       - name: Verify baseline cache and restore cumulative recovery cache
         env:
@@ -109,33 +104,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf "$CCACHE_DIR"
-          mkdir -p "$CCACHE_DIR"
+          rm -rf "$CCACHE_DIR"; mkdir -p "$CCACHE_DIR"
           mapfile -t capsules < <(find "$RUNNER_TEMP/gio-cache-download" -maxdepth 1 -type f -name 'ccache-shard-*.tar' | sort)
-          echo "RECOVERY_BASELINE_CAPSULES=${#capsules[@]}"
           test "${#capsules[@]}" -ge 30
           for capsule in "${capsules[@]}"; do
-            sidecar="${capsule}.sha256"
-            test -s "$sidecar"
-            expected="$(awk 'NR==1 {print $1}' "$sidecar")"
-            actual="$(sha256sum "$capsule" | awk '{print $1}')"
-            test "$actual" = "$expected"
+            sidecar="${capsule}.sha256"; test -s "$sidecar"
+            test "$(sha256sum "$capsule" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
             tar -C "$CCACHE_DIR" -xf "$capsule"
           done
-
           mkdir -p "$RUNNER_TEMP/recovery-cache"
           if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release download "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" \
-              --pattern 'recovery-ccache.tar.zst' --pattern 'recovery-ccache.tar.zst.sha256' \
-              --dir "$RUNNER_TEMP/recovery-cache" || true
-            archive="$RUNNER_TEMP/recovery-cache/recovery-ccache.tar.zst"
-            sidecar="${archive}.sha256"
+            gh release download "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'recovery-ccache.tar.zst' --pattern 'recovery-ccache.tar.zst.sha256' --dir "$RUNNER_TEMP/recovery-cache" || true
+            archive="$RUNNER_TEMP/recovery-cache/recovery-ccache.tar.zst"; sidecar="${archive}.sha256"
             if [ -s "$archive" ] && [ -s "$sidecar" ]; then
-              expected="$(awk 'NR==1 {print $1}' "$sidecar")"
-              actual="$(sha256sum "$archive" | awk '{print $1}')"
-              test "$actual" = "$expected"
+              test "$(sha256sum "$archive" | awk '{print $1}')" = "$(awk 'NR==1 {print $1}' "$sidecar")"
               zstd -dc "$archive" | tar -C "$CCACHE_DIR" -xf -
-              echo "CUMULATIVE_RECOVERY_CACHE=RESTORED"
+              echo CUMULATIVE_RECOVERY_CACHE=RESTORED
             fi
           fi
           ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
@@ -152,6 +136,8 @@ jobs:
           export USE_CCACHE=1
           unset CCACHE_DISABLE || true
           export CCACHE_EXEC="$(command -v ccache)"
+          export CC_WRAPPER="$CCACHE_EXEC"
+          export CXX_WRAPPER="$CCACHE_EXEC"
           export CCACHE_DIR="$CCACHE_DIR"
           export CCACHE_MAXSIZE="$CCACHE_MAXSIZE"
           export CCACHE_BASEDIR="$AOSP_ROOT"
@@ -165,41 +151,19 @@ jobs:
           set -u
           sudo swapoff -a >/dev/null 2>&1 || true
           mkdir -p "$GITHUB_WORKSPACE/public-base"
-          (
-            while true; do
-              printf '\n=== GIO_RECOVERY_V3_HEARTBEAT stage=%s %s ===\n' "$STAGE" "$(date -u +%FT%TZ)"
-              free -h || true
-              df -hT / /mnt /tmp || true
-              ccache --show-stats || true
-              sleep 60
-            done
-          ) &
+          (while true; do echo "=== GIO_RECOVERY_V3_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="; free -h || true; df -hT / /mnt /tmp || true; ccache --show-stats || true; sleep 60; done) &
           HEARTBEAT_PID=$!
           set +e
-          # GitHub has repeatedly killed this public runner around 16-17 minutes
-          # wall time. Keep compilation to three minutes so checkpoint sealing,
-          # release upload and successor dispatch complete before that boundary.
-          timeout --signal=TERM --kill-after=20s 3m \
-            nice -n 10 ionice -c2 -n7 \
+          timeout --signal=TERM --kill-after=20s 8m nice -n 10 ionice -c2 -n7 \
             build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
           rc=$?
           set -e
-          kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true
-          wait "$HEARTBEAT_PID" >/dev/null 2>&1 || true
+          kill "$HEARTBEAT_PID" >/dev/null 2>&1 || true; wait "$HEARTBEAT_PID" >/dev/null 2>&1 || true
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
           otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' 2>/dev/null | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
-          if [ -n "$target_files" ] && [ -f "$target_files" ] && [ -n "$otatools" ] && [ -f "$otatools" ]; then
-            echo 'complete=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'complete=false' >> "$GITHUB_OUTPUT"
-          fi
-
-          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then
-            echo "UNEXPECTED_BUILD_RC=$rc" >&2
-            exit "$rc"
-          fi
+          if [ -n "$target_files" ] && [ -f "$target_files" ] && [ -n "$otatools" ] && [ -f "$otatools" ]; then echo complete=true >> "$GITHUB_OUTPUT"; else echo complete=false >> "$GITHUB_OUTPUT"; fi
+          if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 143 ]; then echo "UNEXPECTED_BUILD_RC=$rc" >&2; exit "$rc"; fi
 
       - name: Seal cumulative compiler cache
         if: ${{ steps.build.outputs.complete != 'true' }}
@@ -208,23 +172,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
-          ccache --cleanup >/dev/null || true
-          ccache --show-stats || true
+          ccache --max-size "$CCACHE_MAXSIZE" >/dev/null; ccache --cleanup >/dev/null || true; ccache --show-stats || true
           archive="$RUNNER_TEMP/recovery-ccache.tar.zst"
           tar -C "$CCACHE_DIR" -cf - . | zstd -1 -T2 -o "$archive"
-          test -s "$archive"
-          size="$(stat -c%s "$archive")"
-          echo "RECOVERY_CACHE_BYTES=$size"
-          test "$size" -lt 1900000000
+          test -s "$archive"; test "$(stat -c%s "$archive")" -lt 1900000000
           sha256sum "$archive" > "${archive}.sha256"
-          if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title 'GIO OS Lavender cumulative recovery ccache v3' \
-              --notes 'Public compiler cache only; no private GIO source or signing keys.' --prerelease
-          fi
-          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "${archive}.sha256" \
-            --repo "$GITHUB_REPOSITORY" --clobber
+          if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender cumulative recovery ccache v3' --notes 'Public compiler cache only; no private GIO source or signing keys.' --prerelease; fi
+          gh release upload "$RECOVERY_CACHE_TAG" "$archive" "${archive}.sha256" --repo "$GITHUB_REPOSITORY" --clobber
           echo "RECOVERY_CACHE_STAGE_${STAGE}=PUBLISHED"
 
       - name: Queue next bounded recovery slice
@@ -234,15 +188,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stage="${STAGE:-1}"
-          case "$stage" in (*[!0-9]*|'') stage=1;; esac
-          if [ "$stage" -ge 12 ]; then
-            echo "RECOVERY_STAGE_LIMIT_REACHED=$stage" >&2
-            exit 1
-          fi
+          stage="${STAGE:-1}"; case "$stage" in (*[!0-9]*|'') stage=1;; esac
+          if [ "$stage" -ge 30 ]; then echo "RECOVERY_STAGE_LIMIT_REACHED=$stage" >&2; exit 1; fi
           next=$((stage + 1))
-          gh workflow run gio-public-target-recovery-v3.yml \
-            --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"
+          gh workflow run gio-public-target-recovery-v3.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"
           echo "NEXT_RECOVERY_STAGE=$next"
 
       - name: Collect and publish verified public base
@@ -254,38 +203,13 @@ jobs:
           set -euo pipefail
           target_files="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
           otatools="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -printf '%T@ %p\n' | sort -nr | awk 'NR==1 {$1=""; sub(/^ /,""); print; exit}')"
-          test -f "$target_files"
-          test -f "$otatools"
-          unzip -t "$target_files" >/dev/null
-          unzip -t "$otatools" >/dev/null
-          cp "$target_files" "$GITHUB_WORKSPACE/public-base/lavender-public-target_files.zip"
-          cp "$otatools" "$GITHUB_WORKSPACE/public-base/otatools.zip"
-          cd "$GITHUB_WORKSPACE/public-base"
-          sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
-          printf '%s\n' \
-            'schema=gio.os.public-base.v3' \
-            'sourcepack_generation=v2-20260902' \
-            'target=lavender' \
-            'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' \
-            'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' \
-            'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' \
-            'private_gio_source_present=false' \
-            'hardware_validated=false' > PROVENANCE.env
-          if ! gh release view "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-              --title 'GIO OS Lavender verified public base v3' \
-              --notes 'Verified public target-files and otatools; private GIO payload absent.' --prerelease
-          fi
-          for f in lavender-public-target_files.zip otatools.zip SHA256SUMS PROVENANCE.env; do
-            size="$(stat -c%s "$f")"
-            if [ "$size" -gt 1900000000 ]; then
-              split -b 1800M -d -a 3 "$f" "${f}.part-"
-              gh release upload "$PUBLIC_BASE_TAG" "${f}.part-"* --repo "$GITHUB_REPOSITORY" --clobber
-            else
-              gh release upload "$PUBLIC_BASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber
-            fi
-          done
-          echo "PUBLIC_BASE_V3=VERIFIED_AND_RELEASED"
+          test -f "$target_files"; test -f "$otatools"; unzip -t "$target_files" >/dev/null; unzip -t "$otatools" >/dev/null
+          cp "$target_files" "$GITHUB_WORKSPACE/public-base/lavender-public-target_files.zip"; cp "$otatools" "$GITHUB_WORKSPACE/public-base/otatools.zip"
+          cd "$GITHUB_WORKSPACE/public-base"; sha256sum lavender-public-target_files.zip otatools.zip > SHA256SUMS
+          printf '%s\n' 'schema=gio.os.public-base.v3' 'sourcepack_generation=v2-20260902' 'target=lavender' 'device_sha=fd2a90e734a101fad046736970fa4dfb492d7d78' 'kernel_sha=b7b27af5994f7afc11f69cfef194a8dc738842b4' 'vendor_sha=483e3e7ca5828c54d8b4408b87ee14069a8d027b' 'private_gio_source_present=false' 'hardware_validated=false' > PROVENANCE.env
+          if ! gh release view "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$PUBLIC_BASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender verified public base v3' --notes 'Verified public target-files and otatools; private GIO payload absent.' --prerelease; fi
+          for f in lavender-public-target_files.zip otatools.zip SHA256SUMS PROVENANCE.env; do size="$(stat -c%s "$f")"; if [ "$size" -gt 1900000000 ]; then split -b 1800M -d -a 3 "$f" "${f}.part-"; gh release upload "$PUBLIC_BASE_TAG" "${f}.part-"* --repo "$GITHUB_REPOSITORY" --clobber; else gh release upload "$PUBLIC_BASE_TAG" "$f" --repo "$GITHUB_REPOSITORY" --clobber; fi; done
+          echo PUBLIC_BASE_V3=VERIFIED_AND_RELEASED
 
       - name: Cleanup
         if: always()
