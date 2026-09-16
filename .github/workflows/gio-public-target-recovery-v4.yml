@@ -118,8 +118,8 @@ jobs:
           kill "$hp" >/dev/null 2>&1 || true
           wait "$hp" >/dev/null 2>&1 || true
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
-          tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null)"
-          ota="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null)"
+          tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null || true)"
+          ota="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null || true)"
           if [ -n "$tf" ] && [ -f "$tf" ] && [ -n "$ota" ] && [ -f "$ota" ]; then echo complete=true >> "$GITHUB_OUTPUT"; else echo complete=false >> "$GITHUB_OUTPUT"; fi
           if [ "$rc" -ne 0 ] && [ "$rc" -ne 124 ] && [ "$rc" -ne 137 ] && [ "$rc" -ne 143 ]; then exit "$rc"; fi
       - name: Queue successor before checkpoint upload
