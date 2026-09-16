@@ -86,17 +86,9 @@ jobs:
           cd "$AOSP_ROOT"
           export OUT_DIR="$OUT_ROOT" GOGC=10
           if ! swapon --show | grep -q .; then
-            sudo fallocate -l 8G "$RUNNER_TEMP/gio.swap"
-            sudo chmod 600 "$RUNNER_TEMP/gio.swap"
-            sudo mkswap "$RUNNER_TEMP/gio.swap" >/dev/null
-            sudo swapon "$RUNNER_TEMP/gio.swap"
+            sudo fallocate -l 8G "$RUNNER_TEMP/gio.swap"; sudo chmod 600 "$RUNNER_TEMP/gio.swap"; sudo mkswap "$RUNNER_TEMP/gio.swap" >/dev/null; sudo swapon "$RUNNER_TEMP/gio.swap"
           fi
-          (while true; do
-            echo "=== GIO_RECOVERY_V4_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="
-            free -h || true
-            df -hT / /mnt /tmp || true
-            sleep 60
-          done) & hp=$!
+          (while true; do echo "=== GIO_RECOVERY_V4_HEARTBEAT stage=$STAGE $(date -u +%FT%TZ) ==="; free -h || true; df -hT / /mnt /tmp || true; sleep 60; done) & hp=$!
           set +e
           setsid bash -c '
             set +u
@@ -109,14 +101,11 @@ jobs:
           while kill -0 "$bp" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 5; done
           if kill -0 "$bp" >/dev/null 2>&1; then
             echo "GIO_RECOVERY_V4_SLICE_EXPIRED=1"
-            kill -TERM -- "-$bp" >/dev/null 2>&1 || true
-            sleep 10
-            kill -KILL -- "-$bp" >/dev/null 2>&1 || true
+            kill -TERM -- "-$bp" >/dev/null 2>&1 || true; sleep 10; kill -KILL -- "-$bp" >/dev/null 2>&1 || true
           fi
           wait "$bp"; rc=$?
           set -e
-          kill "$hp" >/dev/null 2>&1 || true
-          wait "$hp" >/dev/null 2>&1 || true
+          kill "$hp" >/dev/null 2>&1 || true; wait "$hp" >/dev/null 2>&1 || true
           echo "rc=$rc" >> "$GITHUB_OUTPUT"
           tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null || true)"
           ota="$(find "$OUT_ROOT" -type f -name 'otatools.zip' -print -quit 2>/dev/null || true)"
@@ -128,7 +117,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          stage="${STAGE:-1}"; case "$stage" in (*[!0-9]*|'') stage=1;; esac; test "$stage" -lt 40
+          stage="${STAGE:-1}"; case "$stage" in (*[!0-9]*|'') stage=1;; esac; test "$stage" -lt 200
           next=$((stage + 1)); gh workflow run gio-public-target-recovery-v4.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$next"; echo "NEXT_RECOVERY_STAGE=$next"
       - name: Save cumulative Soong OUT checkpoint
         if: ${{ steps.build.outputs.complete != 'true' }}
