@@ -91,7 +91,7 @@ jobs:
         if: ${{ steps.build.outputs.complete != 'true' }}
         env: {GH_TOKEN: '${{ github.token }}'}
         run: |
-          set -euo pipefail; s="${STAGE:-1}"; case "$s" in (*[!0-9]*|'') s=1;; esac; test "$s" -lt 64; gh workflow run gio-public-target-recovery-v11.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$((s+1))"
+          set -euo pipefail; s="${STAGE:-1}"; case "$s" in (*[!0-9]*|'') s=1;; esac; test "$s" -lt 256; gh workflow run gio-public-target-recovery-v11.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage="$((s+1))"
       - name: Publish verified public base
         if: ${{ steps.build.outputs.complete == 'true' }}
         env: {GH_TOKEN: '${{ github.token }}'}
