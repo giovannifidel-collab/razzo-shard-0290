@@ -58,7 +58,7 @@ jobs:
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/cache"; r="$RUNNER_TEMP/recovery"; rm -rf "$d" "$r" "$CCACHE_DIR"; mkdir -p "$d" "$r" "$CCACHE_DIR"
-          gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$d"
+          ok=0; for attempt in 1 2 3 4 5; do rm -rf "$d"/*; if gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$d"; then ok=1; break; fi; echo "BASELINE_CACHE_DOWNLOAD_RETRY=$attempt"; sleep $((attempt*10)); done; test "$ok" -eq 1
           mapfile -t c < <(find "$d" -name 'ccache-shard-*.tar' -type f|sort); test "${#c[@]}" -ge 30
           for f in "${c[@]}"; do test "$(sha256sum "$f"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$f.sha256")"; tar -C "$CCACHE_DIR" -xf "$f"; done
           tag=''; if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$RECOVERY_CACHE_TAG"; elif gh release view "$PREVIOUS_RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$PREVIOUS_RECOVERY_CACHE_TAG"; fi
