@@ -86,7 +86,9 @@ jobs:
           echo complete=false >>"$GITHUB_OUTPUT"; case "$rc" in 0|124|137|143) ;; *) tail -n 300 "$log"||true; exit "$rc";; esac
           ccache --cleanup >/dev/null||true; a="$RUNNER_TEMP/recovery-ccache.tar.zst"; tar -C "$CCACHE_DIR" -cf - .|zstd -1 -T2 -o "$a"; test -s "$a"; sha256sum "$a">"$a.sha256"
           if ! gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then gh release create "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title 'GIO OS Lavender recovery ccache v11' --notes 'Public compiler cache only; immutable product pins unchanged.' --prerelease; fi
-          gh release upload "$RECOVERY_CACHE_TAG" "$a" "$a.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+          if ! gh release upload "$RECOVERY_CACHE_TAG" "$a" "$a.sha256" --repo "$GITHUB_REPOSITORY" --clobber; then
+            echo RECOVERY_CACHE_UPLOAD_TRANSIENT_FAILURE=1
+          fi
       - name: Queue successor
         if: ${{ steps.build.outputs.complete != 'true' }}
         env: {GH_TOKEN: '${{ github.token }}'}
