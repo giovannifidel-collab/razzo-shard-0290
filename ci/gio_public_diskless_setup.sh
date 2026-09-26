@@ -38,7 +38,7 @@ cleanup_partial() {
   sudo dmsetup ls --noheadings -o name 2>/dev/null | awk '/^gio-public-pack-/ {print $1}' | xargs -r -n1 sudo dmsetup remove -f >/dev/null 2>&1 || true
   for dev in /dev/nbd*; do [ -b "$dev" ] && timeout 2s sudo nbd-client -d "$dev" >/dev/null 2>&1 || true; done
   sudo pkill -f nbdkit >/dev/null 2>&1 || true
-  rm -rf /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs
+  sudo rm -rf /mnt/gio-meta /mnt/gio-lower /mnt/gio-upper /mnt/gio-work /mnt/gio-local-packs
   set -e
 }
 
@@ -47,8 +47,9 @@ for attempt in 1 2 3; do
   echo "GIO_PUBLIC_FABRIC_ATTEMPT=$attempt"
   if bash "$TMP" "$@"; then
     exit 0
+  else
+    rc=$?
   fi
-  rc=$?
   echo "GIO_PUBLIC_FABRIC_TRANSIENT_FAILURE attempt=$attempt rc=$rc" >&2
   cleanup_partial
   [ "$attempt" -lt 3 ] && sleep $((attempt * 15))
