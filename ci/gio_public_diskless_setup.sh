@@ -43,7 +43,7 @@ cleanup_partial() {
 }
 
 rc=1
-for attempt in 1 2 3; do
+for attempt in 1 2 3 4 5 6 7 8; do
   echo "GIO_PUBLIC_FABRIC_ATTEMPT=$attempt"
   if bash "$TMP" "$@"; then
     exit 0
@@ -52,6 +52,6 @@ for attempt in 1 2 3; do
   fi
   echo "GIO_PUBLIC_FABRIC_TRANSIENT_FAILURE attempt=$attempt rc=$rc" >&2
   cleanup_partial
-  [ "$attempt" -lt 3 ] && sleep $((attempt * 15))
+  [ "$attempt" -lt 8 ] && sleep $((attempt < 4 ? attempt * 15 : 45))
 done
 exit "$rc"
