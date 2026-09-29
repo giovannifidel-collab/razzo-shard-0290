@@ -104,4 +104,4 @@ jobs:
         if: always()
         run: |
           set +e; sudo umount "$AOSP_ROOT" >/dev/null 2>&1||true; for m in /mnt/gio-lower/*; do [ -d "$m" ]&&sudo umount "$m" >/dev/null 2>&1||true; done; sudo pkill -f nbdkit >/dev/null 2>&1||true
-# recovery restart marker: root-safe fabric retry
+# recovery restart marker: NBD retry hardening
