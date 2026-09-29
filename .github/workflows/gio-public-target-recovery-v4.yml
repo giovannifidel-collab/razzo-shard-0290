@@ -97,7 +97,7 @@ jobs:
             set -u
             exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
           ' & bp=$!
-          deadline=$((SECONDS + 480))
+          deadline=$((SECONDS + 1800))
           while kill -0 "$bp" >/dev/null 2>&1 && [ "$SECONDS" -lt "$deadline" ]; do sleep 5; done
           if kill -0 "$bp" >/dev/null 2>&1; then
             echo "GIO_RECOVERY_V4_SLICE_EXPIRED=1"
