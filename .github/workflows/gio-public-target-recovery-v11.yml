@@ -58,11 +58,11 @@ jobs:
         run: |
           set -euo pipefail
           d="$RUNNER_TEMP/cache"; r="$RUNNER_TEMP/recovery"; rm -rf "$d" "$r" "$CCACHE_DIR"; mkdir -p "$d" "$r" "$CCACHE_DIR"
-          ok=0; for attempt in 1 2 3 4 5; do rm -rf "$d"/*; if gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*.tar' --pattern 'ccache-shard-*.tar.sha256' --dir "$d"; then ok=1; break; fi; echo "BASELINE_CACHE_DOWNLOAD_RETRY=$attempt"; sleep $((attempt*10)); done; test "$ok" -eq 1
+          ok=0; for attempt in 1 2 3 4 5; do rm -rf "$d"/*; if gh release download "$BASELINE_CACHE_TAG" --repo "$GITHUB_REPOSITORY" --pattern 'ccache-shard-*' --dir "$d"; then ok=1; break; fi; echo "BASELINE_CACHE_DOWNLOAD_RETRY=$attempt"; sleep $((attempt*10)); done; test "$ok" -eq 1
           mapfile -t c < <(find "$d" -name 'ccache-shard-*.tar' -type f|sort); test "${#c[@]}" -ge 30
-          for f in "${c[@]}"; do test "$(sha256sum "$f"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$f.sha256")"; tar -C "$CCACHE_DIR" -xf "$f"; done
+          for f in "${c[@]}"; do test -s "$f.sha256"; test "$(sha256sum "$f"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$f.sha256")"; tar -C "$CCACHE_DIR" -xf "$f"; done
           tag=''; if gh release view "$RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$RECOVERY_CACHE_TAG"; elif gh release view "$PREVIOUS_RECOVERY_CACHE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then tag="$PREVIOUS_RECOVERY_CACHE_TAG"; fi
-          if [ -n "$tag" ]; then gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern recovery-ccache.tar.zst --pattern recovery-ccache.tar.zst.sha256 --dir "$r" || true; a="$r/recovery-ccache.tar.zst"; if [ -s "$a" ] && [ -s "$a.sha256" ]; then test "$(sha256sum "$a"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$a.sha256")"; zstd -dc "$a"|tar -C "$CCACHE_DIR" -xf -; fi; fi
+          if [ -n "$tag" ]; then gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern 'recovery-ccache.tar.zst*' --dir "$r" || true; a="$r/recovery-ccache.tar.zst"; if [ -s "$a" ] && [ -s "$a.sha256" ]; then test "$(sha256sum "$a"|awk '{print $1}')" = "$(awk 'NR==1{print $1}' "$a.sha256")"; zstd -dc "$a"|tar -C "$CCACHE_DIR" -xf -; fi; fi
           ccache --max-size "$CCACHE_MAXSIZE" >/dev/null
       - name: Bounded bootstrap compile and checkpoint
         id: build
@@ -104,4 +104,4 @@ jobs:
         if: always()
         run: |
           set +e; sudo umount "$AOSP_ROOT" >/dev/null 2>&1||true; for m in /mnt/gio-lower/*; do [ -d "$m" ]&&sudo umount "$m" >/dev/null 2>&1||true; done; sudo pkill -f nbdkit >/dev/null 2>&1||true
-# recovery restart marker: NBD retry hardening
+# recovery restart marker: baseline release glob hardening
