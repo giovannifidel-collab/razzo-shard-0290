@@ -27,7 +27,7 @@ concurrency: {group: gio-public-target-recovery-v11, cancel-in-progress: false}
 jobs:
   recover:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 58
     env:
       STAGE: ${{ inputs.stage || '1' }}
     steps:
@@ -72,9 +72,7 @@ jobs:
               got="$(sha256sum "$a"|awk '{print $1}')"; want="$(awk 'NR==1{print $1}' "$a.sha256")"
               if [ "$got" = "$want" ] && zstd -t "$a" >/dev/null 2>&1; then
                 if zstd -dc "$a" | tar -C "$CCACHE_DIR" -xf -; then echo RECOVERY_CACHE_IMPORTED=1; else echo RECOVERY_CACHE_IMPORT_SKIPPED=tar; fi
-              else
-                echo RECOVERY_CACHE_IMPORT_SKIPPED=stale_or_invalid_pair
-              fi
+              else echo RECOVERY_CACHE_IMPORT_SKIPPED=stale_or_invalid_pair; fi
             fi
           fi
           ccache --max-size "$CCACHE_MAXSIZE" >/dev/null 2>&1 || echo CCACHE_SIZE_CONFIG_NONFATAL=1
@@ -92,7 +90,7 @@ jobs:
           export TARGET_PRODUCT=lineage_lavender TARGET_RELEASE=ap2a TARGET_BUILD_VARIANT=userdebug
           exec nice -n 10 ionice -c2 -n7 build/soong/soong_ui.bash --make-mode target-files-package otatools-package -j1
           EOS
-          chmod +x "$runner"; set +e; setsid bash "$runner" > >(tee "$log") 2>&1 & p=$!; rc=0; deadline=$((SECONDS+720))
+          chmod +x "$runner"; set +e; setsid bash "$runner" > >(tee "$log") 2>&1 & p=$!; rc=0; deadline=$((SECONDS+600))
           while kill -0 "$p" 2>/dev/null; do if [ "$SECONDS" -ge "$deadline" ]; then echo SLICE_EXPIRED=1; kill -TERM -- "-$p" 2>/dev/null||true; sleep 10; kill -KILL -- "-$p" 2>/dev/null||true; wait "$p" 2>/dev/null||true; rc=124; break; fi; sleep 15; done
           if [ "$rc" -eq 0 ]; then wait "$p"; rc=$?; fi; set -e; echo SLICE_RC=$rc
           tf="$(find "$OUT_ROOT" -type f -name '*target_files*.zip' -print -quit 2>/dev/null||true)"; ota="$(find "$OUT_ROOT" -type f -name otatools.zip -print -quit 2>/dev/null||true)"
