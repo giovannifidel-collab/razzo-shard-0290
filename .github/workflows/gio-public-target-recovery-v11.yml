@@ -117,3 +117,4 @@ jobs:
         run: |
           set +e; sudo umount "$AOSP_ROOT" >/dev/null 2>&1||true; for m in /mnt/gio-lower/*; do [ -d "$m" ]&&sudo umount "$m" >/dev/null 2>&1||true; done; sudo pkill -f nbdkit >/dev/null 2>&1||true
 # recovery restart marker: verified baseline cache quorum
+# recovery restart marker: idempotent public asset compatibility patch
