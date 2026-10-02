@@ -1,0 +1,16 @@
+name: GIO OS Public Recovery Kick
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/gio-public-recovery-kick.yml']
+permissions:
+  actions: write
+  contents: read
+jobs:
+  resume:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Dispatch current recovery
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run gio-public-target-recovery-v11.yml --repo "$GITHUB_REPOSITORY" --ref main -f stage=33
