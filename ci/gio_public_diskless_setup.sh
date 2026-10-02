@@ -13,15 +13,19 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 s = p.read_text()
-# Old and current formatting variants; absence is acceptable.
-s = s.replace('asset_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")', ': # public cross-repo binary assets are fetched anonymously')
-s = s.replace('asset_headers+=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )', ': # public cross-repo binary assets are fetched anonymously')
-s = s.replace('nbd_args+=(header="Authorization: Bearer ${GITHUB_TOKEN}")', ': # public cross-repo NBD assets are fetched anonymously')
-s = s.replace('nbd_args+=( header="Authorization: Bearer ${GITHUB_TOKEN}" )', ': # public cross-repo NBD assets are fetched anonymously')
+# Replace binary-asset auth appends with a syntactically valid no-op. Never
+# insert a shell comment: the compact origin can put `fi` later on that line.
+s = s.replace('asset_headers+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")', 'true')
+s = s.replace('asset_headers+=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )', 'true')
+s = s.replace('nbd_args+=(header="Authorization: Bearer ${GITHUB_TOKEN}")', 'true')
+s = s.replace('nbd_args+=( header="Authorization: Bearer ${GITHUB_TOKEN}" )', 'true')
 s = s.replace("'.assets[]|select(.name==$n)|.url'", "'.assets[]|select(.name==$n)|.browser_download_url'")
 s = s.replace("'.assets[] | select(.name==$n) | .url'", "'.assets[] | select(.name==$n) | .browser_download_url'")
 p.write_text(s)
 PY
+
+# Detect a bad compatibility transform before spending time on retries.
+bash -n "$TMP"
 
 cleanup_partial() {
   set +e
