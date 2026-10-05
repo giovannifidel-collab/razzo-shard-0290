@@ -13,6 +13,10 @@ s=s.replace('nbd_args+=(header="Authorization: Bearer ${GITHUB_TOKEN}")','true')
 s=s.replace('nbd_args+=( header="Authorization: Bearer ${GITHUB_TOKEN}" )','true')
 s=s.replace("'.assets[]|select(.name==$n)|.url'","'.assets[]|select(.name==$n)|.browser_download_url'")
 s=s.replace("'.assets[] | select(.name==$n) | .url'","'.assets[] | select(.name==$n) | .browser_download_url'")
+# A failed remote-pack attempt can leave a forced/busy dm mapping alive briefly.
+# Key the mapper by the monotonically advancing nbd index so an in-run retry
+# never collides with a stale name. This changes only runner plumbing, not data.
+s=s.replace('sudo dmsetup create "gio-public-pack-${id}"<"$table"; packdev="/dev/mapper/gio-public-pack-${id}"', 'dmname="gio-public-pack-${id}-${nbd}"; sudo dmsetup create "$dmname"<"$table"; packdev="/dev/mapper/$dmname"')
 p.write_text(s)
 PY
 bash -n "$TMP"
