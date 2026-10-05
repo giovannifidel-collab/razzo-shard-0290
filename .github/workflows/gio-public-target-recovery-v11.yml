@@ -119,3 +119,4 @@ jobs:
 # recovery restart marker: verified baseline cache quorum
 # recovery restart marker: idempotent public asset compatibility patch
 # recovery restart marker: public asset auth hardening applied
+# recovery restart marker: collision-free dm retry plumbing
